@@ -1,0 +1,18 @@
+fastapi>=0.110
+uvicorn>=0.23
+pydantic>=2.6
+pandas>=2.0
+numpy>=1.26
+yfinance>=0.2.50
+requests>=2.31
+python-dotenv>=1.0
+streamlit>=1.36
+fastmcp>=0.2.5
+matplotlib
+openai>=1.0
+
+# CrewAI dependencies
+crewai>=0.28.0
+langchain>=0.1.0
+langchain-openai>=0.1.0
+
