@@ -299,6 +299,10 @@ def create_agents(openai_api_key: str) -> Dict[str, Agent]:
     if not CREWAI_AVAILABLE:
         return {}
     
+    # Set OpenAI API key early for CrewAI
+    import os
+    os.environ["OPENAI_API_KEY"] = openai_api_key
+    
     # Initialize MCP tools
     search_tool = SearchSymbolsTool()
     quote_tool = GetQuoteTool()
@@ -506,9 +510,7 @@ def run_crewai_analysis(symbol: str, openai_api_key: str, progress_callback=None
         except Exception as e:
             raise Exception(f"MCP server is not responding: {str(e)}")
         
-        # Set OpenAI API key
-        import os
-        os.environ["OPENAI_API_KEY"] = openai_api_key
+        # OpenAI API key already set in create_agents()
         
         # Execute the crew workflow
         if progress_callback:
