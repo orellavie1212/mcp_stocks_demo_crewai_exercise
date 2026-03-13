@@ -1,0 +1,303 @@
+# =============================================================================
+# Stock Agent Platform — Docker Compose (Local Development)
+# =============================================================================
+# Teaching note:
+#   This file represents Stage 2 of our 4-stage architecture.
+#   All services run locally, with network boundaries between them.
+#
+#   Start everything: make up
+#   URLs:
+#     Streamlit UI     : http://localhost:8501
+#     Job API docs     : http://localhost:8000/docs
+#     MCP Server docs  : http://localhost:8001/docs
+#     Agent Runtime    : http://localhost:8002/docs (HTTP mode)
+#     Langfuse UI      : http://localhost:3000
+#     Redis            : localhost:6379
+#     Pub/Sub emulator : localhost:8085
+# =============================================================================
+
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# Shared environment — overridden per service below
+# ---------------------------------------------------------------------------
+x-common-env: &common-env
+  LOG_LEVEL: INFO
+  LOG_FORMAT: text           # Human-readable for local dev
+  ENVIRONMENT: local
+
+  # LLM — uses Google AI Studio key locally
+  LLM_PROVIDER: google_ai_studio
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_FAST_MODEL: gemini-2.5-flash-lite
+  GEMINI_MAIN_MODEL: gemini-2.5-flash
+  GEMINI_STRONG_MODEL: gemini-2.5-pro
+
+  # Service URLs (using Docker internal DNS)
+  MCP_SERVER_URL: http://mcp-server:8001
+  JOB_API_URL: http://job-api:8000
+  AGENT_RUNTIME_URL: http://agent-runtime:8002
+
+  # Redis
+  REDIS_URL: redis://redis:6379/0
+  REDIS_CACHE_TTL_SECONDS: 3600
+
+  # Pub/Sub emulator
+  PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+  PUBSUB_PROJECT_ID: local-project
+  PUBSUB_TOPIC_ANALYSIS_REQUESTS: analysis-requests
+  PUBSUB_TOPIC_ANALYSIS_DLQ: analysis-dlq
+  PUBSUB_SUBSCRIPTION_AGENT_WORKER: agent-worker-sub
+  PUBSUB_MAX_RETRIES: "3"
+
+  # Firestore (use in-memory fallback for pure local dev)
+  FIRESTORE_PROJECT_ID: local-project
+
+  # Langfuse
+  LANGFUSE_HOST: http://langfuse:3000
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local}
+  LANGFUSE_ENABLED: "true"
+
+  # Security
+  INTERNAL_API_TOKEN: dev-token-local
+  API_AUTH_ENABLED: "false"
+
+  # Guardrails
+  GUARDRAIL_MAX_INPUT_LENGTH: "2000"
+  GUARDRAIL_MAX_TOOL_CALLS: "30"
+  GUARDRAIL_INJECTION_DETECTION: "true"
+
+  # Rate limiting
+  RATE_LIMIT_RPM: "20"
+
+networks:
+  stock-agent-net:
+    driver: bridge
+
+volumes:
+  redis-data:
+  langfuse-postgres-data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Infrastructure Services
+  # ---------------------------------------------------------------------------
+
+  redis:
+    image: redis:7-alpine
+    container_name: stock-agent-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    container_name: stock-agent-pubsub
+    command: >
+      gcloud beta emulators pubsub start
+      --host-port=0.0.0.0:8085
+      --project=local-project
+    ports:
+      - "8085:8085"
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/v1/projects/local-project/topics"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Pub/Sub topic + subscription initializer (runs once and exits)
+  pubsub-init:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    container_name: stock-agent-pubsub-init
+    environment:
+      PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+    networks:
+      - stock-agent-net
+    depends_on:
+      pubsub-emulator:
+        condition: service_healthy
+    command: >
+      bash -c "
+        export PUBSUB_EMULATOR_HOST=pubsub-emulator:8085 &&
+        gcloud config set project local-project &&
+        gcloud pubsub topics create analysis-requests --project=local-project 2>/dev/null || true &&
+        gcloud pubsub topics create analysis-dlq --project=local-project 2>/dev/null || true &&
+        gcloud pubsub subscriptions create agent-worker-sub
+          --topic=analysis-requests
+          --project=local-project
+          --dead-letter-topic=analysis-dlq
+          --max-delivery-attempts=3 2>/dev/null || true &&
+        echo 'Pub/Sub topics and subscriptions created'
+      "
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Langfuse (LLM Observability)
+  # Teaching note: Self-hosted, completely free!
+  # ---------------------------------------------------------------------------
+
+  langfuse-postgres:
+    image: postgres:16-alpine
+    container_name: stock-agent-langfuse-db
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse_local
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  langfuse:
+    image: langfuse/langfuse:latest
+    container_name: stock-agent-langfuse
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse_local@langfuse-postgres:5432/langfuse
+      NEXTAUTH_SECRET: local-secret-change-in-prod
+      NEXTAUTH_URL: http://localhost:3000
+      SALT: local-salt-change-in-prod
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      LANGFUSE_INIT_ORG_ID: local-org
+      LANGFUSE_INIT_ORG_NAME: "Stock Agent Demo"
+      LANGFUSE_INIT_PROJECT_ID: local-project
+      LANGFUSE_INIT_PROJECT_NAME: "Stock Analysis"
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-local
+      LANGFUSE_INIT_USER_EMAIL: admin@localhost
+      LANGFUSE_INIT_USER_NAME: Admin
+      LANGFUSE_INIT_USER_PASSWORD: admin123
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Application Services
+  # ---------------------------------------------------------------------------
+
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: apps/mcp-server/Dockerfile
+    container_name: stock-agent-mcp
+    ports:
+      - "8001:8001"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: mcp-server
+      PORT: "8001"
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  job-api:
+    build:
+      context: ..
+      dockerfile: apps/job-api/Dockerfile
+    container_name: stock-agent-job-api
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: job-api
+      PORT: "8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      pubsub-emulator:
+        condition: service_healthy
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  agent-runtime:
+    build:
+      context: ..
+      dockerfile: apps/agent-runtime/Dockerfile
+    container_name: stock-agent-worker
+    ports:
+      - "8002:8002"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: agent-runtime
+      WORKER_MODE: pubsub
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+      job-api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pubsub-init:
+        condition: service_completed_successfully
+    networks:
+      - stock-agent-net
+    restart: unless-stopped
+    # Scale workers: docker compose up --scale agent-runtime=3
+    deploy:
+      replicas: 1
+
+  frontend-streamlit:
+    build:
+      context: ..
+      dockerfile: apps/frontend-streamlit/Dockerfile
+    container_name: stock-agent-ui
+    ports:
+      - "8501:8501"
+    environment:
+      <<: *common-env
+      SERVICE_NAME: frontend-streamlit
+      JOB_API_URL: http://job-api:8000
+      LANGFUSE_HOST: http://localhost:3000
+    depends_on:
+      job-api:
+        condition: service_healthy
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8501/_stcore/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped

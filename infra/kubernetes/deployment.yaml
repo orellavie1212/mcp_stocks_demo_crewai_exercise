@@ -1,0 +1,188 @@
+# =============================================================================
+# Kubernetes Manifests — Agent Runtime Workers (GKE Autopilot)
+# =============================================================================
+# Teaching note:
+#   Stage 4: Agent workers run as Kubernetes Deployments on GKE.
+#   HPA (Horizontal Pod Autoscaler) scales up when queue depth increases.
+#   Workload Identity means NO API keys in the container — GKE pod = GCP identity.
+#
+# Apply: kubectl apply -f infra/kubernetes/ -n stock-agent
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stock-agent
+  labels:
+    app: stock-agent
+
+---
+# ServiceAccount with Workload Identity binding
+# Teaching note: This pod's SA = GCP SA "agent-runtime@PROJECT.iam.gserviceaccount.com"
+# No credentials needed in the container!
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-runtime
+  namespace: stock-agent
+  annotations:
+    iam.gke.io/gcp-service-account: agent-runtime@GCP_PROJECT_PLACEHOLDER.iam.gserviceaccount.com
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-runtime
+  namespace: stock-agent
+  labels:
+    app: agent-runtime
+    component: worker
+spec:
+  replicas: 2  # Start with 2 — HPA will scale up/down
+  selector:
+    matchLabels:
+      app: agent-runtime
+  template:
+    metadata:
+      labels:
+        app: agent-runtime
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: agent-runtime
+
+      # Terminate gracefully — let current job finish
+      terminationGracePeriodSeconds: 660  # 11 min > max job timeout
+
+      containers:
+        - name: worker
+          image: REGION-docker.pkg.dev/GCP_PROJECT_PLACEHOLDER/stock-agent/agent-runtime:latest
+          imagePullPolicy: Always
+
+          command: ["python", "worker.py", "--mode", "pubsub"]
+
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2"
+
+          env:
+            - name: WORKER_MODE
+              value: "pubsub"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: LLM_PROVIDER
+              value: "vertex_ai"
+            - name: GCP_PROJECT
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: gcp_project
+            - name: GCP_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: gcp_region
+            - name: MCP_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: mcp_server_url
+            - name: JOB_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: job_api_url
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: redis_url
+            - name: PUBSUB_PROJECT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: gcp_project
+            - name: FIRESTORE_PROJECT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: gcp_project
+            # Secrets injected from Secret Manager via Kubernetes Secrets
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stock-agent-secrets
+                  key: internal_api_token
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: stock-agent-secrets
+                  key: langfuse_secret_key
+
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "print('alive')"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+
+      # Anti-affinity: spread pods across nodes for resilience
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: agent-runtime
+                topologyKey: kubernetes.io/hostname
+
+---
+# HPA — Scale workers based on Pub/Sub queue depth
+# Teaching note:
+#   Scale UP when queue has > 5 unprocessed messages per pod
+#   Scale DOWN when queue is empty (scale to 1 minimum — keep warm)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent-runtime-hpa
+  namespace: stock-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agent-runtime
+  minReplicas: 1
+  maxReplicas: 20
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: pubsub.googleapis.com|subscription|num_undelivered_messages
+          selector:
+            matchLabels:
+              resource.labels.subscription_id: agent-worker-sub
+        target:
+          type: AverageValue
+          averageValue: "5"  # 1 new pod per 5 pending messages
+
+---
+# ConfigMap (non-sensitive configuration)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stock-agent-config
+  namespace: stock-agent
+data:
+  gcp_project: "GCP_PROJECT_PLACEHOLDER"
+  gcp_region: "us-central1"
+  mcp_server_url: "https://mcp-server-HASH-uc.a.run.app"
+  job_api_url: "https://job-api-HASH-uc.a.run.app"
+  redis_url: "redis://10.0.0.10:6379/0"

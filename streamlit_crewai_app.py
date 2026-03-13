@@ -118,7 +118,7 @@ def main():
     st.markdown("**Comprehensive stock analysis using specialized AI agents**")
     
     # Simple instructions
-    st.info("💡 **Quick Start:** 1) Start MCP Server (sidebar) → 2) Enter OpenAI API Key → 3) Enter stock symbol → 4) Click Start Analysis")
+    st.info("💡 **Quick Start:** 1) Start MCP Server (sidebar) → 2) Enter Gemini API Key → 3) Enter stock symbol → 4) Click Start Analysis")
     
     # Sidebar configuration
     with st.sidebar:
@@ -140,16 +140,16 @@ def main():
         
         st.markdown("---")
         
-        # OpenAI API Key
-        st.subheader("🔑 OpenAI API Key")
-        openai_api_key = st.text_input(
-            "Enter your OpenAI API Key",
-            value=st.session_state.get("openai_api_key", ""),
+        # Gemini API Key
+        st.subheader("🔑 Gemini API Key")
+        gemini_api_key = st.text_input(
+            "Enter your Gemini API Key",
+            value=st.session_state.get("gemini_api_key", ""),
             type="password",
-            help="Required for LLM explanations in technical analysis"
+            help="Get a free key at https://aistudio.google.com/apikey"
         )
-        if openai_api_key:
-            st.session_state["openai_api_key"] = openai_api_key
+        if gemini_api_key:
+            st.session_state["gemini_api_key"] = gemini_api_key
             st.success("✅ API Key Set")
         else:
             st.warning("⚠️ API Key Required")
@@ -160,8 +160,8 @@ def main():
         st.error("CrewAI is not installed. Please install it using the command in the sidebar.")
         return
     
-    if not openai_api_key:
-        st.warning("Please enter your OpenAI API key in the sidebar to enable LLM explanations.")
+    if not gemini_api_key:
+        st.warning("Please enter your Gemini API key in the sidebar to enable LLM explanations.")
     
     # Stock selection
     st.header("📊 Stock Selection")
@@ -237,9 +237,9 @@ def main():
     if not check_mcp_api():
         st.error("MCP API server is not running. Please start it using the button in the sidebar.")
         return
-    
+
     col1, col2, col3 = st.columns([1, 1, 2])
-    
+
     with col1:
         run_analysis = st.button("🔍 Start Analysis", type="primary", use_container_width=True)
     
@@ -265,7 +265,7 @@ def main():
         st.rerun()
     
     # Run analysis
-    if run_analysis and symbol and openai_api_key and not st.session_state.get("analysis_running", False):
+    if run_analysis and symbol and gemini_api_key and not st.session_state.get("analysis_running", False):
         # Set flag to prevent multiple executions
         st.session_state["analysis_running"] = True
         
@@ -301,7 +301,7 @@ def main():
         
         # Run analysis directly with progress updates
         try:
-            result = run_crewai_analysis(symbol, openai_api_key, update_progress, verbose_callback)
+            result = run_crewai_analysis(symbol, gemini_api_key, update_progress, verbose_callback)
             
             # Store in session state
             st.session_state["analysis_result"] = result
@@ -400,7 +400,7 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>🤖 CrewAI + MCP Stocks Analysis Demo | Powered by OpenAI & Yahoo Finance</p>
+        <p>🤖 CrewAI + MCP Stocks Analysis Demo | Powered by Google Gemini & Yahoo Finance</p>
     </div>
     """, unsafe_allow_html=True)
 

@@ -41,7 +41,7 @@ except ImportError:
         return []
 
 def create_agents(
-    openai_api_key: str,
+    gemini_api_key: str,
     research_tools: Optional[List[str]] = None,
     technical_tools: Optional[List[str]] = None,
     sector_tools: Optional[List[str]] = None,
@@ -49,22 +49,30 @@ def create_agents(
 ) -> Dict[str, Agent]:
     """
     Create CrewAI agents with configurable tools.
-    
+
     Args:
-        openai_api_key: OpenAI API key for LLM explanations
-        research_tools: List of tool names for research agent (default: ["search_symbols", "get_quote", "get_price_series"])
-        technical_tools: List of tool names for technical agent (default: ["get_indicators", "get_events", "get_explanation"])
-        sector_tools: List of tool names for sector agent (default: ["search_symbols", "get_quote", "get_indicators"])
-        report_tools: List of tool names for report agent (default: [])
-    
+        gemini_api_key: Gemini API key for LLM calls
+        research_tools: List of tool names for research agent
+        technical_tools: List of tool names for technical agent
+        sector_tools: List of tool names for sector agent
+        report_tools: List of tool names for report agent
+
     Returns:
         Dictionary of agents
     """
     if not CREWAI_AVAILABLE:
         return {}
-    
-     # get_tools_by_names already imported at top of file
-    
+
+    # Build a shared Gemini LLM instance using crewai.LLM (LiteLLM-backed)
+    # This is the pattern from https://ai.google.dev/gemini-api/docs/crewai-example
+    # LiteLLM uses GEMINI_API_KEY for the gemini/ model prefix — set it explicitly
+    os.environ["GEMINI_API_KEY"] = gemini_api_key
+    from crewai import LLM as CrewLLM
+    gemini_llm = CrewLLM(
+        model="gemini/gemini-2.5-flash",
+        api_key=gemini_api_key,
+        temperature=0.0)
+ 
     # Default tools if not provided
     if research_tools is None:
         research_tools = ["search_symbols", "get_quote", "get_price_series"]
@@ -74,62 +82,66 @@ def create_agents(
         sector_tools = ["search_symbols", "get_quote", "get_indicators"]
     if report_tools is None:
         report_tools = []
-    
+
     # Get tool functions from names
-    research_tool_funcs = get_tools_by_names(research_tools, openai_api_key)
-    technical_tool_funcs = get_tools_by_names(technical_tools, openai_api_key)
-    sector_tool_funcs = get_tools_by_names(sector_tools, openai_api_key)
-    report_tool_funcs = get_tools_by_names(report_tools, openai_api_key)
-    
+    research_tool_funcs = get_tools_by_names(research_tools, gemini_api_key)
+    technical_tool_funcs = get_tools_by_names(technical_tools, gemini_api_key)
+    sector_tool_funcs = get_tools_by_names(sector_tools, gemini_api_key)
+    report_tool_funcs = get_tools_by_names(report_tools, gemini_api_key)
+
     # Research Agent
     research_agent = Agent(
         role="Stock Research Specialist",
         goal="Gather comprehensive basic information about stocks including current quotes, historical data, and company details",
-        backstory="""You are an experienced stock researcher with deep knowledge of financial markets. 
-        Your expertise lies in efficiently gathering and organizing stock data from multiple sources. 
+        backstory="""You are an experienced stock researcher with deep knowledge of financial markets.
+        Your expertise lies in efficiently gathering and organizing stock data from multiple sources.
         You excel at finding relevant information quickly and presenting it in a clear, structured format.""",
         tools=research_tool_funcs,
-        verbose=True,  # Enable verbose output
+        llm=gemini_llm,
+        verbose=True,
         allow_delegation=False
     )
-    
+
     # Technical Analyst
     technical_agent = Agent(
         role="Technical Analysis Expert",
         goal="Perform detailed technical analysis using indicators, patterns, and market events to assess stock momentum and trends",
-        backstory="""You are a seasoned technical analyst with 15+ years of experience in chart analysis and market indicators. 
-        You specialize in interpreting technical signals, identifying patterns, and understanding market psychology. 
+        backstory="""You are a seasoned technical analyst with 15+ years of experience in chart analysis and market indicators.
+        You specialize in interpreting technical signals, identifying patterns, and understanding market psychology.
         Your analysis is methodical and based on proven technical analysis principles.""",
         tools=technical_tool_funcs,
-        verbose=True,  # Enable verbose output
+        llm=gemini_llm,
+        verbose=True,
         allow_delegation=False
     )
-    
+
     # Sector Analyst
     sector_agent = Agent(
         role="Sector Comparison Specialist",
         goal="Compare the target stock's performance, valuation, and fundamentals against its sector peers to identify relative strengths and weaknesses",
-        backstory="""You are a seasoned sector analyst with 15 years of experience in comparative market analysis. 
-        You specialize in identifying sector trends, peer comparisons, and relative performance metrics. 
-        Your expertise lies in understanding how individual stocks perform within their sector context 
+        backstory="""You are a seasoned sector analyst with 15 years of experience in comparative market analysis.
+        You specialize in identifying sector trends, peer comparisons, and relative performance metrics.
+        Your expertise lies in understanding how individual stocks perform within their sector context
         and identifying which companies are sector leaders or laggards.""",
         tools=sector_tool_funcs,
-        verbose=True,  # Enable verbose output
+        llm=gemini_llm,
+        verbose=True,
         allow_delegation=False
     )
-    
+
     # Report Writer
     report_agent = Agent(
         role="Financial Report Writer",
         goal="Create comprehensive, well-structured investment reports that synthesize research, technical analysis, and sector comparison into actionable insights",
-        backstory="""You are a professional financial writer with expertise in translating complex market data into clear, 
-        actionable reports. You have a talent for presenting technical information in an accessible way while maintaining 
+        backstory="""You are a professional financial writer with expertise in translating complex market data into clear,
+        actionable reports. You have a talent for presenting technical information in an accessible way while maintaining
         accuracy and professional standards. Your reports are known for their clarity and practical insights.""",
         tools=report_tool_funcs,
-        verbose=True,  # Enable verbose output
+        llm=gemini_llm,
+        verbose=True,
         allow_delegation=False
     )
-    
+
     return {
         "research": research_agent,
         "technical": technical_agent,
@@ -138,30 +150,28 @@ def create_agents(
     }
 
 def create_tasks(
-    symbol: str, 
-    openai_api_key: str,
+    symbol: str,
+    gemini_api_key: str,
     research_tools: Optional[List[str]] = None,
     technical_tools: Optional[List[str]] = None,
     sector_tools: Optional[List[str]] = None
 ) -> List[Task]:
     """
     Create CrewAI tasks with configurable tools.
-    
+
     Args:
         symbol: Stock symbol to analyze
-        openai_api_key: OpenAI API key for LLM explanations
-        research_tools: List of tool names for research task (default: ["search_symbols", "get_quote", "get_price_series"])
-        technical_tools: List of tool names for technical task (default: ["get_indicators", "get_events", "get_explanation"])
-        sector_tools: List of tool names for sector task (default: ["search_symbols", "get_quote", "get_indicators"])
-    
+        gemini_api_key: Gemini API key (passed to explanation tool)
+        research_tools: List of tool names for research task
+        technical_tools: List of tool names for technical task
+        sector_tools: List of tool names for sector task
+
     Returns:
         List of tasks
     """
     if not CREWAI_AVAILABLE:
         return []
-    
-     # get_tools_by_names already imported at top of file
-    
+
     # Default tools if not provided
     if research_tools is None:
         research_tools = ["search_symbols", "get_quote", "get_price_series"]
@@ -169,11 +179,11 @@ def create_tasks(
         technical_tools = ["get_indicators", "get_events", "get_explanation"]
     if sector_tools is None:
         sector_tools = ["search_symbols", "get_quote", "get_indicators"]
-    
+
     # Get tool functions from names
-    research_tool_funcs = get_tools_by_names(research_tools, openai_api_key)
-    technical_tool_funcs = get_tools_by_names(technical_tools, openai_api_key)
-    sector_tool_funcs = get_tools_by_names(sector_tools, openai_api_key)
+    research_tool_funcs = get_tools_by_names(research_tools, gemini_api_key)
+    technical_tool_funcs = get_tools_by_names(technical_tools, gemini_api_key)
+    sector_tool_funcs = get_tools_by_names(sector_tools, gemini_api_key)
     
     # Research Task - EXPLICITLY REQUIRES TOOL CALLS
     research_task = Task(
@@ -282,9 +292,9 @@ def create_tasks(
     return [research_task, technical_task, sector_task, report_task]
 
 def run_crewai_analysis(
-    symbol: str, 
-    openai_api_key: str, 
-    progress_callback: Optional[Callable[[str, Optional[int]], None]] = None, 
+    symbol: str,
+    gemini_api_key: str,
+    progress_callback: Optional[Callable[[str, Optional[int]], None]] = None,
     verbose_callback: Optional[Callable[[str], None]] = None,
     research_tools: Optional[List[str]] = None,
     technical_tools: Optional[List[str]] = None,
@@ -294,45 +304,42 @@ def run_crewai_analysis(
     """Run CrewAI analysis with progress tracking"""
     if not CREWAI_AVAILABLE:
         return {"error": "CrewAI not available"}
-    
-    # Store original environment variable
-    original_api_key = os.environ.get("OPENAI_API_KEY", None)
-    
-    # Validate and set API key - prioritize input field over environment variable
-    openai_api_key = openai_api_key.strip() if openai_api_key else ""
-    
-    if not openai_api_key:
-        # Check if environment variable exists as fallback
-        env_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+
+    # Validate and set Gemini API key
+    gemini_api_key = gemini_api_key.strip() if gemini_api_key else ""
+
+    if not gemini_api_key:
+        # Fallback to environment variable
+        env_api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
         if env_api_key:
-            openai_api_key = env_api_key
+            gemini_api_key = env_api_key
         else:
             return {
                 "success": False,
-                "error": "OpenAI API key is required. Please enter it in the sidebar.",
+                "error": "Gemini API key is required. Please enter it in the sidebar.",
                 "timestamp": datetime.now().isoformat(),
                 "symbol": symbol
             }
-    
-    # Set the environment variable with the validated key (this is what CrewAI uses)
-    os.environ["OPENAI_API_KEY"] = openai_api_key
-    
+
+    # Set GOOGLE_API_KEY so langchain_google_genai can also pick it up from env
+    os.environ["GOOGLE_API_KEY"] = gemini_api_key
+
     try:
         # Clear tool trace at start of analysis
         from mcp_server import clear_tool_trace
         clear_tool_trace()
-        
+
         # Create agents
         if progress_callback:
             progress_callback("🔧 Creating agents...", 5)
-        
-        agents = create_agents(openai_api_key, research_tools, technical_tools, sector_tools, report_tools)
-        
+
+        agents = create_agents(gemini_api_key, research_tools, technical_tools, sector_tools, report_tools)
+
         # Create tasks
         if progress_callback:
             progress_callback("📋 Setting up tasks...", 8)
-        
-        tasks = create_tasks(symbol, openai_api_key, research_tools, technical_tools, sector_tools)
+
+        tasks = create_tasks(symbol, gemini_api_key, research_tools, technical_tools, sector_tools)
         
         # Assign agents to tasks
         tasks[0].agent = agents["research"]
@@ -460,9 +467,4 @@ def run_crewai_analysis(
             "symbol": symbol
         }
     finally:
-        # Restore original environment variable
-        if original_api_key is not None:
-            os.environ["OPENAI_API_KEY"] = original_api_key
-        elif "OPENAI_API_KEY" in os.environ and openai_api_key:
-            # Only remove if we set it (i.e., if openai_api_key was provided)
-            del os.environ["OPENAI_API_KEY"]
+        pass  # GOOGLE_API_KEY set above is fine to leave in env for the session

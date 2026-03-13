@@ -1,0 +1,29 @@
+# Agent Runtime — heaviest service (CrewAI + LangChain + Gemini)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pydantic-settings>=2.2
+python-dotenv>=1.0
+httpx>=0.27
+
+# CrewAI + LangChain
+crewai>=0.28.0
+langchain>=0.2
+langchain-core>=0.2
+
+# Gemini LLM
+langchain-google-genai>=1.0    # Google AI Studio (local dev)
+langchain-google-vertexai>=1.0 # Vertex AI (production, Workload Identity)
+
+# GCP clients
+google-cloud-pubsub>=2.21
+google-cloud-firestore>=2.16
+
+# Redis (caching + rate limiting)
+redis[asyncio]>=5.0
+
+# Langfuse (LLM observability)
+langfuse>=2.0
+
+# Observability
+opentelemetry-sdk>=1.24

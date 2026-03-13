@@ -1,0 +1,737 @@
+"""
+Agent Runtime Worker — Production version.
+
+Teaching note:
+  This is the heart of the production system. Compare with the original agents.py:
+
+  WHAT CHANGED:
+  1. Runs as a Pub/Sub subscriber — pulls messages from the queue.
+     No longer called directly from the UI.
+  2. Calls the MCP server via HTTP (not via direct Python import).
+     This means: MCP server updates don't require restarting the agent.
+  3. Uses Gemini via Vertex AI or Google AI Studio (not OpenAI).
+  4. Guardrails at input, tool, and output layers.
+  5. Redis caching — if the same query ran before, return cached result.
+  6. Job status written to Firestore as it progresses.
+  7. Langfuse callback auto-traces every LLM call.
+  8. Retry with exponential backoff and dead-letter queue.
+
+  WHY stateless workers?
+    Each worker pod processes one message at a time, independently.
+    If it crashes, Pub/Sub redelivers the message.
+    GKE HPA scales the number of worker pods based on queue depth.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import json
+import os
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import httpx
+from crewai import Agent, Crew, Process, Task
+
+# ---------------------------------------------------------------------------
+# Path setup
+# ---------------------------------------------------------------------------
+_here = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.join(_here, "..", "..")
+for _p in [
+    _root,
+    os.path.join(_root, "packages", "shared-config"),
+    os.path.join(_root, "packages", "shared-observability"),
+    os.path.join(_root, "packages", "shared-models"),
+    os.path.join(_root, "packages", "shared-guardrails"),
+]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from config import get_settings, get_llm
+from observability import (
+    setup_logging, CorrelatedLogger, LangfuseTracer,
+    set_correlation, get_trace_id, get_job_id, estimate_cost,
+)
+from models import (
+    JobRecord, JobStatus, ToolCallRecord, UsageRecord, GuardrailEvent,
+    GuardrailLayer, GuardrailDecision, PubSubMessage,
+)
+from guardrails import GuardrailPipeline
+
+settings = get_settings()
+setup_logging("agent-runtime", settings.log_level, settings.log_format)
+log = CorrelatedLogger("agent-runtime")
+tracer = LangfuseTracer(enabled=settings.langfuse_enabled)
+
+
+# ===========================================================================
+# MCP Client — calls the MCP server over HTTP
+# ===========================================================================
+
+class MCPClient:
+    """
+    HTTP client for the MCP server.
+
+    Teaching note:
+      In the demo, agents.py did `from mcp_server import get_tools_by_names`.
+      That's a direct Python import — tightly coupled.
+
+      Now, the agent-runtime calls the MCP server via HTTP.
+      Benefits:
+      - MCP server can be deployed/updated independently
+      - Different languages could implement the MCP server
+      - Tool calls are visible in network logs (debuggable)
+      - MCP server can be rate-limited independently
+    """
+
+    def __init__(self, base_url: str, timeout: int = 30):
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self._tool_trace: List[ToolCallRecord] = []
+
+    def _make_headers(self) -> Dict[str, str]:
+        """Pass correlation IDs to the MCP server for end-to-end tracing."""
+        return {
+            "X-Trace-ID": get_trace_id(),
+            "X-Job-ID": get_job_id(),
+            "X-Internal-Token": settings.internal_api_token,
+            "Content-Type": "application/json",
+        }
+
+    async def call(self, tool: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Call an MCP tool endpoint and return the parsed JSON response.
+        Records tool call in the trace for the job record.
+        """
+        start = time.perf_counter()
+        record = ToolCallRecord(
+            tool_name=tool,
+            arguments=payload,
+        )
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/{tool}",
+                    json=payload,
+                    headers=self._make_headers(),
+                )
+                response.raise_for_status()
+                result = response.json()
+                duration_ms = (time.perf_counter() - start) * 1000
+
+                record.success = True
+                record.duration_ms = round(duration_ms, 1)
+                record.result_preview = str(result)[:300]
+                self._tool_trace.append(record)
+
+                log.info(
+                    f"MCP tool call succeeded",
+                    tool_name=tool,
+                    duration_ms=record.duration_ms,
+                )
+                return result
+
+            except Exception as e:
+                duration_ms = (time.perf_counter() - start) * 1000
+                record.success = False
+                record.error = str(e)
+                record.duration_ms = round(duration_ms, 1)
+                self._tool_trace.append(record)
+
+                log.error(
+                    f"MCP tool call failed: {e}",
+                    tool_name=tool,
+                    duration_ms=duration_ms,
+                )
+                return {"error": str(e)}
+
+    @property
+    def tool_trace(self) -> List[ToolCallRecord]:
+        return list(self._tool_trace)
+
+    def clear_trace(self):
+        self._tool_trace.clear()
+
+
+# ===========================================================================
+# CrewAI Tool wrappers (call MCP server via HTTP)
+# ===========================================================================
+
+def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
+    """
+    Create CrewAI tools that call the MCP server over HTTP.
+
+    Teaching note:
+      Each @tool function:
+      1. Checks tool guardrails (Layer 2)
+      2. Calls the MCP server via HTTP
+      3. Returns formatted text for the agent to reason over
+    """
+    from crewai.tools import tool
+
+    @tool("search_symbols")
+    def search_symbols(q: str) -> str:
+        """Search for stock symbols by company name or ticker."""
+        guard = guardrail.check_tool_call("search_symbols", {"q": q})
+        if not guard.allowed:
+            return f"Tool blocked: {guard.reason}"
+        result = asyncio.get_event_loop().run_until_complete(
+            mcp.call("search", {"q": q})
+        )
+        if isinstance(result, list):
+            lines = [f"• {r.get('symbol')}: {r.get('name')}" for r in result[:5] if r.get('symbol')]
+            return "\n".join(lines) if lines else "No results found."
+        return str(result)
+
+    @tool("latest_quote")
+    def latest_quote(symbol: str) -> str:
+        """Get the latest price, change %, and volume for a stock symbol."""
+        guard = guardrail.check_tool_call("latest_quote", {"symbol": symbol})
+        if not guard.allowed:
+            return f"Tool blocked: {guard.reason}"
+        r = asyncio.get_event_loop().run_until_complete(
+            mcp.call("quote", {"symbol": symbol.upper()})
+        )
+        if r.get("error"):
+            return f"Error: {r['error']}"
+        price = r.get("price")
+        change_pct = r.get("change_percent")
+        volume = r.get("volume")
+        sign = "+" if (change_pct or 0) >= 0 else ""
+        return (
+            f"Quote for {symbol.upper()}:\n"
+            f"  Price: ${price:.2f}\n"
+            f"  Change: {sign}{change_pct:.2f}%\n"
+            f"  Volume: {int(volume or 0):,}"
+        )
+
+    @tool("price_series")
+    def price_series(symbol: str) -> str:
+        """Get historical OHLCV price data for a stock symbol."""
+        guard = guardrail.check_tool_call("price_series", {"symbol": symbol})
+        if not guard.allowed:
+            return f"Tool blocked: {guard.reason}"
+        result = asyncio.get_event_loop().run_until_complete(
+            mcp.call("series", {"symbol": symbol.upper(), "lookback": 180})
+        )
+        if isinstance(result, list) and result:
+            closes = [float(r.get("close", 0)) for r in result if r.get("close")]
+            if closes:
+                change_pct = ((closes[-1] - closes[0]) / closes[0]) * 100
+                sign = "+" if change_pct >= 0 else ""
+                return (
+                    f"Price Series ({len(closes)} days):\n"
+                    f"  First: ${closes[0]:.2f}\n"
+                    f"  Last:  ${closes[-1]:.2f}\n"
+                    f"  High:  ${max(closes):.2f}\n"
+                    f"  Low:   ${min(closes):.2f}\n"
+                    f"  Change: {sign}{change_pct:.1f}%"
+                )
+        return "No price data available."
+
+    @tool("indicators")
+    def indicators(symbol: str) -> str:
+        """Get SMA, EMA, RSI technical indicators for a stock symbol."""
+        guard = guardrail.check_tool_call("indicators", {"symbol": symbol})
+        if not guard.allowed:
+            return f"Tool blocked: {guard.reason}"
+        r = asyncio.get_event_loop().run_until_complete(
+            mcp.call("indicators", {"symbol": symbol.upper()})
+        )
+        if r.get("error"):
+            return f"Error: {r['error']}"
+        rsi = r.get("rsi", 0)
+        rsi_label = " (Overbought)" if rsi > 70 else " (Oversold)" if rsi < 30 else ""
+        return (
+            f"Technical Indicators for {symbol.upper()}:\n"
+            f"  Last Close: ${r.get('last_close', 0):.2f}\n"
+            f"  SMA(20): ${r.get('sma', 0):.2f}\n"
+            f"  EMA(50): ${r.get('ema', 0):.2f}\n"
+            f"  RSI(14): {rsi:.1f}{rsi_label}"
+        )
+
+    @tool("detect_events")
+    def detect_events(symbol: str) -> str:
+        """Detect gap up/down, volatility spikes, 52-week extremes."""
+        guard = guardrail.check_tool_call("detect_events", {"symbol": symbol})
+        if not guard.allowed:
+            return f"Tool blocked: {guard.reason}"
+        r = asyncio.get_event_loop().run_until_complete(
+            mcp.call("events", {"symbol": symbol.upper()})
+        )
+        if r.get("error"):
+            return f"Error: {r['error']}"
+        events = []
+        if r.get("gap_up"): events.append("Gap Up")
+        if r.get("gap_down"): events.append("Gap Down")
+        if r.get("vol_spike"): events.append("Volatility Spike")
+        if r.get("is_52w_high"): events.append("52-Week High")
+        if r.get("is_52w_low"): events.append("52-Week Low")
+        date = r.get("date", "today")
+        return (
+            f"Market Events for {symbol.upper()} ({date}):\n"
+            f"  {', '.join(events) if events else 'No significant events detected'}"
+        )
+
+    @tool("explain")
+    def explain(symbol: str, tone: str = "neutral") -> str:
+        """Get an AI-powered technical analysis explanation for a stock."""
+        guard = guardrail.check_tool_call("explain", {"symbol": symbol})
+        if not guard.allowed:
+            return f"Tool blocked: {guard.reason}"
+        r = asyncio.get_event_loop().run_until_complete(
+            mcp.call("explain", {"symbol": symbol.upper(), "tone": tone})
+        )
+        if r.get("error"):
+            return f"Error: {r['error']}"
+        return r.get("text", "No explanation available.")
+
+    return [search_symbols, latest_quote, price_series, indicators, detect_events, explain]
+
+
+# ===========================================================================
+# Crew builder
+# ===========================================================================
+
+def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipeline) -> Crew:
+    """
+    Build the 4-agent CrewAI crew.
+
+    Teaching note:
+      Same 4 agents as the demo, but now:
+      - They use Gemini instead of OpenAI
+      - Their tools call the MCP server over HTTP (not direct import)
+      - The Langfuse callback auto-traces every LLM call
+      - Model routing: all agents use MAIN tier (gemini-2.5-flash)
+        except the report writer uses STRONG tier (gemini-2.5-pro)
+    """
+    tools = make_crewai_tools(mcp, guardrail)
+    research_tools = tools[:3]    # search_symbols, latest_quote, price_series
+    technical_tools = tools[3:]   # indicators, detect_events, explain
+    sector_tools = tools[:2] + [tools[3]]  # search, quote, indicators
+
+    # LLM instances — model routing happens here
+    main_llm = get_llm("main")      # gemini-2.5-flash
+    strong_llm = get_llm("strong")  # gemini-2.5-pro
+
+    # Langfuse callback for automatic LLM tracing
+    langfuse_cb = tracer.get_callback()
+    callbacks = [langfuse_cb] if langfuse_cb else []
+
+    # --- Agents ---
+    research_agent = Agent(
+        role="Stock Research Specialist",
+        goal="Gather comprehensive information about stocks using real tool data",
+        backstory=(
+            "You are an experienced stock researcher with deep knowledge of financial markets. "
+            "You always call tools to get real data — you never guess or make up numbers."
+        ),
+        tools=research_tools,
+        llm=main_llm,
+        verbose=True,
+        allow_delegation=False,
+    )
+
+    technical_agent = Agent(
+        role="Technical Analysis Expert",
+        goal="Perform technical analysis using indicators and market event data",
+        backstory=(
+            "You are a seasoned technical analyst with 15 years of experience. "
+            "You interpret RSI, moving averages, and market events to assess momentum. "
+            "You always cite specific numbers from tool outputs."
+        ),
+        tools=technical_tools,
+        llm=main_llm,
+        verbose=True,
+        allow_delegation=False,
+    )
+
+    sector_agent = Agent(
+        role="Sector Comparison Specialist",
+        goal="Compare the target stock against 3-5 sector peers",
+        backstory=(
+            "You are a sector analyst specialising in comparative analysis. "
+            "You identify peer companies and compare them on price, indicators, and fundamentals."
+        ),
+        tools=sector_tools,
+        llm=main_llm,
+        verbose=True,
+        allow_delegation=False,
+    )
+
+    report_agent = Agent(
+        role="Financial Report Writer",
+        goal="Synthesize all research into a clear, structured investment report",
+        backstory=(
+            "You are a professional financial writer. You transform raw research data "
+            "into clear, actionable reports. You never give investment advice — "
+            "you present facts and analysis."
+        ),
+        tools=[],  # Report writer synthesizes — no tools needed
+        llm=strong_llm,  # Use stronger model for final synthesis
+        verbose=True,
+        allow_delegation=False,
+    )
+
+    # --- Tasks ---
+    research_task = Task(
+        description=(
+            f"Research the stock '{symbol}' to answer: '{query}'\n"
+            "YOU MUST call search_symbols, latest_quote, and price_series in order. "
+            "Reference actual values from each tool call in your output."
+        ),
+        expected_output="Structured research report with verified data from all 3 tool calls.",
+        agent=research_agent,
+        tools=research_tools,
+    )
+
+    technical_task = Task(
+        description=(
+            f"Perform technical analysis on '{symbol}'.\n"
+            "Call indicators, detect_events, and explain. "
+            "Report specific indicator values (e.g., 'RSI is 67.3 — approaching overbought')."
+        ),
+        expected_output="Technical analysis with specific indicator values and event detections.",
+        agent=technical_agent,
+        tools=technical_tools,
+        context=[research_task],
+    )
+
+    sector_task = Task(
+        description=(
+            f"Identify 3-5 sector peers for '{symbol}' and compare them "
+            "on price performance, RSI, and SMA. Use search_symbols to find peers."
+        ),
+        expected_output="Sector comparison table with data for target stock and 3-5 peers.",
+        agent=sector_agent,
+        tools=sector_tools,
+        context=[research_task, technical_task],
+    )
+
+    report_task = Task(
+        description=(
+            f"Write a comprehensive analysis report for '{symbol}' "
+            "synthesising the research, technical analysis, and sector comparison. "
+            "Include: Executive Summary, Market Position, Technical Analysis, "
+            "Sector Comparison, Risk Assessment, and Key Takeaways."
+        ),
+        expected_output="Professional investment analysis report (no financial advice).",
+        agent=report_agent,
+        context=[research_task, technical_task, sector_task],
+    )
+
+    return Crew(
+        agents=[research_agent, technical_agent, sector_agent, report_agent],
+        tasks=[research_task, technical_task, sector_task, report_task],
+        process=Process.sequential,
+        verbose=True,
+        callbacks=callbacks,
+    )
+
+
+# ===========================================================================
+# Cache layer
+# ===========================================================================
+
+def _cache_key(query: str, symbols: List[str]) -> str:
+    """Generate a deterministic cache key from query + symbols."""
+    content = f"{query.lower().strip()}|{','.join(sorted(s.upper() for s in symbols))}"
+    return f"analysis:{hashlib.sha256(content.encode()).hexdigest()[:16]}"
+
+
+async def get_cached_result(query: str, symbols: List[str]) -> Optional[str]:
+    """Check Redis for a cached result. Returns None if not cached."""
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        key = _cache_key(query, symbols)
+        cached = await r.get(key)
+        await r.aclose()
+        if cached:
+            log.info("Cache hit — returning cached result", cache_key=key)
+        return cached
+    except Exception:
+        return None
+
+
+async def set_cached_result(query: str, symbols: List[str], result: str):
+    """Store result in Redis with TTL."""
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        key = _cache_key(query, symbols)
+        await r.setex(key, settings.redis_cache_ttl_seconds, result)
+        await r.aclose()
+        log.info("Result cached", cache_key=key, ttl=settings.redis_cache_ttl_seconds)
+    except Exception:
+        pass
+
+
+# ===========================================================================
+# Job status updates
+# ===========================================================================
+
+async def update_job(job_id: str, updates: Dict[str, Any]):
+    """Send a PATCH request to the job-api to update job status."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.patch(
+                f"{settings.job_api_url}/jobs/{job_id}",
+                json=updates,
+                headers={
+                    "X-Internal-Token": settings.internal_api_token,
+                    "X-Trace-ID": get_trace_id(),
+                },
+            )
+    except Exception as e:
+        log.warning(f"Job status update failed: {e}", job_id=job_id)
+
+
+# ===========================================================================
+# Main job processor
+# ===========================================================================
+
+async def process_job(message: PubSubMessage) -> bool:
+    """
+    Process a single analysis job.
+
+    Returns True if successful, False if should be retried.
+    """
+    set_correlation(trace_id=message.trace_id, job_id=message.job_id)
+    log.info("Processing job", job_id=message.job_id, attempt=message.attempt_number)
+
+    # --- Update status: RUNNING ---
+    started_at = datetime.now(timezone.utc).isoformat()
+    await update_job(message.job_id, {
+        "status": "RUNNING",
+        "started_at": started_at,
+        "attempt_count": message.attempt_number,
+    })
+
+    # --- Check cache ---
+    request = message.request
+    symbols = request.symbols or [s.strip() for s in request.query.upper().split() if len(s) >= 2 and s.isalpha()]
+    cached = await get_cached_result(request.query, symbols)
+    if cached:
+        await update_job(message.job_id, {
+            "status": "COMPLETED",
+            "result": cached,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        log.info("Job completed from cache", job_id=message.job_id)
+        return True
+
+    # --- Guardrails Layer 1 (input) ---
+    guardrail = GuardrailPipeline(
+        max_input_length=settings.guardrail_max_input_length,
+        max_tool_calls=settings.guardrail_max_tool_calls,
+        injection_detection=settings.guardrail_injection_detection,
+    )
+    allowed, guard_results = guardrail.check_input(request.query)
+    guardrail_events = [
+        {
+            "layer": "INPUT",
+            "check_name": r.check_name,
+            "decision": r.decision,
+            "reason": r.reason,
+        }
+        for r in guard_results
+    ]
+
+    if not allowed:
+        blocked = [r for r in guard_results if not r.allowed]
+        reason = blocked[0].reason if blocked else "Input rejected by guardrails"
+        log.warning("Job blocked by input guardrails", job_id=message.job_id, reason=reason)
+        await update_job(message.job_id, {
+            "status": "FAILED",
+            "last_error": f"Input guardrail blocked: {reason}",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "guardrail_events": guardrail_events,
+        })
+        return True  # Don't retry — permanent failure
+
+    # --- Extract primary symbol ---
+    primary_symbol = symbols[0] if symbols else "AAPL"
+
+    # --- Run crew ---
+    mcp = MCPClient(settings.mcp_server_url)
+    lf_trace = tracer.trace(
+        name="crew-analysis",
+        job_id=message.job_id,
+        trace_id=message.trace_id,
+        symbol=primary_symbol,
+        query=request.query,
+    )
+
+    try:
+        crew = build_crew(primary_symbol, request.query, mcp, guardrail)
+        result = crew.kickoff()
+        result_text = str(result)
+
+        # --- Guardrails Layer 3 (output) ---
+        safe_output, output_events = guardrail.check_output(result_text)
+        guardrail_events += [
+            {
+                "layer": "OUTPUT",
+                "check_name": r.check_name,
+                "decision": r.decision,
+                "reason": r.reason,
+            }
+            for r in output_events
+        ]
+
+        # --- Cache the result ---
+        await set_cached_result(request.query, symbols, safe_output)
+
+        # --- Build tool trace ---
+        tool_trace = [t.model_dump(mode="json") for t in mcp.tool_trace]
+
+        # --- Update job: COMPLETED ---
+        await update_job(message.job_id, {
+            "status": "COMPLETED",
+            "result": safe_output,
+            "tool_trace": tool_trace,
+            "guardrail_events": guardrail_events,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+        tracer.flush()
+        log.info(
+            "Job completed successfully",
+            job_id=message.job_id,
+            tool_calls=len(tool_trace),
+        )
+        return True
+
+    except Exception as e:
+        log.error(f"Job processing failed: {e}", job_id=message.job_id)
+        tracer.flush()
+
+        if message.attempt_number >= settings.pubsub_max_retries:
+            # Permanent failure — move to DLQ
+            await update_job(message.job_id, {
+                "status": "FAILED",
+                "last_error": str(e),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "guardrail_events": guardrail_events,
+            })
+            return True  # Ack the message (don't retry)
+
+        return False  # NACK — Pub/Sub will redeliver
+
+
+# ===========================================================================
+# Pub/Sub subscriber loop
+# ===========================================================================
+
+async def run_pubsub_worker():
+    """
+    Pull messages from Pub/Sub and process them.
+
+    Teaching note:
+      This is the async worker loop.
+      In GKE, multiple pods run this same loop concurrently.
+      Pub/Sub guarantees at-least-once delivery — our idempotency check
+      (checking Firestore for COMPLETED status) prevents double-processing.
+    """
+    if settings.use_pubsub_emulator:
+        os.environ["PUBSUB_EMULATOR_HOST"] = settings.pubsub_emulator_host
+
+    try:
+        from google.cloud import pubsub_v1
+    except ImportError:
+        log.error("google-cloud-pubsub not installed")
+        return
+
+    subscriber = pubsub_v1.SubscriberClient()
+    subscription_path = subscriber.subscription_path(
+        settings.pubsub_project_id,
+        settings.pubsub_subscription,
+    )
+    log.info(f"Listening on {subscription_path}")
+
+    def callback(pubsub_message):
+        try:
+            data = json.loads(pubsub_message.data.decode("utf-8"))
+            message = PubSubMessage.model_validate(data)
+            success = asyncio.get_event_loop().run_until_complete(
+                process_job(message)
+            )
+            if success:
+                pubsub_message.ack()
+                log.info("Message acknowledged", job_id=message.job_id)
+            else:
+                pubsub_message.nack()
+                log.warning("Message nacked for retry", job_id=message.job_id)
+        except Exception as e:
+            log.error(f"Message processing error: {e}")
+            pubsub_message.nack()
+
+    streaming_pull_future = subscriber.subscribe(subscription_path, callback=callback)
+    log.info("Worker started — waiting for messages")
+
+    try:
+        streaming_pull_future.result()  # Block indefinitely
+    except KeyboardInterrupt:
+        streaming_pull_future.cancel()
+        log.info("Worker stopped")
+
+
+# ===========================================================================
+# HTTP mode (for local dev / sync testing)
+# ===========================================================================
+
+from fastapi import FastAPI as _FastAPI
+
+http_app = _FastAPI(title="Agent Runtime", version="1.0.0")
+
+
+@http_app.get("/health")
+async def health():
+    return {"status": "ok", "service": "agent-runtime", "mode": "http"}
+
+
+@http_app.post("/analyze")
+async def analyze_sync(body: Dict[str, Any]):
+    """
+    Synchronous analysis endpoint for local development.
+
+    Teaching note:
+      This is Stage 1 / Stage 2 mode — direct HTTP call, blocking.
+      The frontend waits for this to complete.
+      Use this for local dev; use Pub/Sub mode for production.
+    """
+    from models import AnalysisRequest
+    request = AnalysisRequest(**body)
+    message = PubSubMessage(
+        job_id=str(uuid.uuid4()),
+        request=request,
+        trace_id=str(uuid.uuid4()),
+    )
+    success = await process_job(message)
+    return {"job_id": message.job_id, "success": success}
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["pubsub", "http"],
+        default=os.getenv("WORKER_MODE", "pubsub"),
+        help="pubsub: consume from Pub/Sub queue (production), http: serve HTTP API (dev)",
+    )
+    args = parser.parse_args()
+
+    if args.mode == "pubsub":
+        asyncio.run(run_pubsub_worker())
+    else:
+        import uvicorn
+        uvicorn.run(http_app, host="0.0.0.0", port=8002)

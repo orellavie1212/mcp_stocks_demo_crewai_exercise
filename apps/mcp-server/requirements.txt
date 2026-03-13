@@ -1,0 +1,24 @@
+# MCP Server dependencies
+# Intentionally minimal — no CrewAI, no LangChain agents
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pydantic-settings>=2.2
+pandas>=2.0
+numpy>=1.26
+yfinance>=0.2.50
+requests>=2.31
+python-dotenv>=1.0
+fastmcp>=0.2.5
+
+# LLM (for /explain endpoint)
+langchain-core>=0.2
+langchain-google-genai>=1.0    # Local dev (Google AI Studio)
+langchain-google-vertexai>=1.0 # Production (Vertex AI / Workload Identity)
+
+# Observability
+opentelemetry-sdk>=1.24
+opentelemetry-exporter-gcp-trace>=1.6; extra == "gcp"
+
+# Teaching note: This requirements.txt is ~200MB smaller than agent-runtime
+# because it doesn't include crewai, langchain agents, etc.

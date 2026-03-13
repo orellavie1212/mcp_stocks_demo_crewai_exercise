@@ -89,7 +89,7 @@ class ExplainBody(BaseModel):
     risk_profile: str = Field("balanced", description="cautious | balanced | aggressive")
     horizon_days: int = Field(30, ge=5, le=365)
     bullets: bool = Field(True, description="If true, return bullet points")
-    openai_api_key: str = Field("", description="OpenAI API key for LLM explanations")
+    gemini_api_key: str = Field("", description="Gemini API key for LLM explanations")
 
 class BundleBody(BaseModel):
     """Fetch price series + indicators + events in one shot."""
@@ -98,11 +98,20 @@ class BundleBody(BaseModel):
     window_sma: int = Field(20, ge=2, le=500)
     window_ema: int = Field(50, ge=2, le=500)
     window_rsi: int = Field(14, ge=2, le=200)
-    openai_api_key: str = Field("", description="OpenAI API key for LLM explanations")
+    gemini_api_key: str = Field("", description="Gemini API key for LLM explanations")
 
 # ---------------------------
 # Health
 # ---------------------------
+
+@app.get("/")
+def root():
+    """Root endpoint — confirms the MCP API is running."""
+    return {
+        "service": "MCP Stocks API",
+        "status": "ok",
+        "endpoints": ["/health", "/search", "/quote", "/series", "/indicators", "/events", "/explain", "/bundle"],
+    }
 
 @app.get("/health")
 def health():
@@ -173,13 +182,13 @@ async def route_explain(body: ExplainBody):
     try:
         t = _tools()
         out = t.explain(
-            body.symbol, 
-            body.language, 
-            body.tone, 
-            body.risk_profile, 
-            body.horizon_days, 
+            body.symbol,
+            body.language,
+            body.tone,
+            body.risk_profile,
+            body.horizon_days,
             body.bullets,
-            body.openai_api_key
+            body.gemini_api_key,
         )
         return _ok(out)
     except ValidationError as ve:
@@ -195,7 +204,7 @@ async def route_bundle(body: BundleBody):
         series = _ok(t.price_series(body.symbol, "daily", body.lookback))
         indicators = _ok(t.indicators(body.symbol, body.window_sma, body.window_ema, body.window_rsi))
         events = _ok(t.detect_events(body.symbol))
-        explain = _ok(t.explain(body.symbol, openai_api_key=body.openai_api_key))
+        explain = _ok(t.explain(body.symbol, gemini_api_key=body.gemini_api_key))
         return {"series": series, "indicators": indicators, "events": events, "explain": explain}
     except ValidationError as ve:
         return _error("validation_error", ve.json(), status=422)
