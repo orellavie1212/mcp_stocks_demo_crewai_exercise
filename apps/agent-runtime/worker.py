@@ -557,16 +557,17 @@ async def process_job(message: PubSubMessage) -> bool:
         query=request.query,
     )
 
+    import re as _re
+    def _strip_ansi(text: str) -> str:
+        text = _re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
+        return _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
     try:
         crew = build_crew(primary_symbol, request.query, mcp, guardrail)
         result = crew.kickoff()
         # Strip ANSI escape codes and control chars — CrewAI verbose output
         # contains rich terminal formatting that breaks JSON serialization
-        import re as _re
-        _ansi = _re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        result_text = _ansi.sub('', str(result))
-        # Strip remaining ASCII control chars (keep \n \t)
-        result_text = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', result_text)
+        result_text = _strip_ansi(str(result))
 
         # --- Guardrails Layer 3 (output) ---
         safe_output, output_events = guardrail.check_output(result_text)

@@ -374,6 +374,15 @@ class LangfuseTracer:
 
         Plug this into CrewAI to auto-trace ALL LLM calls:
             crew = Crew(..., callbacks=[tracer.get_callback()])
+
+        Teaching note:
+          This callback intercepts every LLM call CrewAI makes and sends
+          the full prompt + response + token count to Langfuse.
+          You can then see in Langfuse UI:
+          - What prompt was sent to Gemini
+          - What Gemini responded
+          - How many tokens it used (and estimated cost)
+          - Which agent step triggered this call
         """
         if not self.enabled or not self._client:
             return None

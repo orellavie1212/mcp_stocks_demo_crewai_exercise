@@ -23,7 +23,11 @@ google-cloud-firestore>=2.16
 redis[asyncio]>=5.0
 
 # Langfuse (LLM observability)
-langfuse>=2.0
+# Pin to v2.x: Langfuse SDK v3+ uses the OpenTelemetry endpoint
+# (/api/public/otel/v1/traces) which requires Langfuse server v3+.
+# Server v3 needs ClickHouse — too heavy for local dev.
+# SDK v2 uses /api/public/ingestion which works with server v2 (Postgres only).
+langfuse>=2.0,<3.0
 
 # Observability
 opentelemetry-sdk>=1.24
