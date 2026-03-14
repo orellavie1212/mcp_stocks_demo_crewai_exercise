@@ -34,8 +34,11 @@ help:  ## Show this help
 # LOCAL DEVELOPMENT
 # =============================================================================
 
+# Docker Compose helper — always load .env from repo root
+DC = docker compose --env-file .env -f docker/docker-compose.yml
+
 up: ## Start full local stack (all services + Redis + Pub/Sub emulator + Langfuse)
-	docker compose -f docker/docker-compose.yml up --build -d
+	$(DC) up --build -d
 	@echo ""
 	@echo "✅ Stack started:"
 	@echo "  Streamlit UI  : http://localhost:8501"
@@ -45,16 +48,16 @@ up: ## Start full local stack (all services + Redis + Pub/Sub emulator + Langfus
 	@echo ""
 
 down: ## Stop local stack
-	docker compose -f docker/docker-compose.yml down
+	$(DC) down
 
 logs: ## Tail logs from all services
-	docker compose -f docker/docker-compose.yml logs -f
+	$(DC) logs -f
 
 restart: ## Restart a specific service (SERVICE=agent-runtime)
-	docker compose -f docker/docker-compose.yml restart $(SERVICE)
+	$(DC) restart $(SERVICE)
 
 up-simple: ## Start simplified stack (sync mode, no Pub/Sub, no Redis)
-	docker compose -f docker/docker-compose.simple.yml up --build -d
+	docker compose --env-file .env -f docker/docker-compose.simple.yml up --build -d
 
 # =============================================================================
 # TESTING

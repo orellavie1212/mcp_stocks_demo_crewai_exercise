@@ -101,6 +101,10 @@ def get_firestore():
     except ImportError:
         log.warning("google-cloud-firestore not installed — using in-memory fallback")
         return None
+    except Exception as e:
+        # No GCP credentials (local Docker without ADC) — fall back to in-memory
+        log.warning(f"Firestore unavailable ({type(e).__name__}) — using in-memory fallback")
+        return None
 
 
 # ---------------------------------------------------------------------------

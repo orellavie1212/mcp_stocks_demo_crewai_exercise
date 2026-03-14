@@ -1,14 +1,15 @@
 # Frontend Dockerfile — smallest image (~180MB)
 FROM python:3.11-slim AS builder
 WORKDIR /build
-COPY requirements.txt .
+# Build context is repo root (context: .. in docker-compose.yml)
+COPY apps/frontend-streamlit/requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 FROM python:3.11-slim AS runtime
 RUN useradd -m -u 1000 appuser
 WORKDIR /app
 COPY --from=builder /root/.local /home/appuser/.local
-COPY app.py /app/app.py
+COPY apps/frontend-streamlit/app.py /app/app.py
 
 ENV PATH="/home/appuser/.local/bin:$PATH"
 ENV SERVICE_NAME=frontend-streamlit

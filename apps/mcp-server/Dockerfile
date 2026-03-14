@@ -20,8 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies first (Docker layer cache)
-COPY requirements.txt .
+# Build context is repo root (context: .. in docker-compose.yml)
+COPY apps/mcp-server/requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # Stage 2: Runtime image
@@ -35,15 +35,15 @@ WORKDIR /app
 # Copy installed packages from builder
 COPY --from=builder /root/.local /home/appuser/.local
 
-# Copy shared packages
-COPY ../../packages/shared-config /app/packages/shared-config
-COPY ../../packages/shared-observability /app/packages/shared-observability
+# Copy shared packages (paths relative to repo root build context)
+COPY packages/shared-config /app/packages/shared-config
+COPY packages/shared-observability /app/packages/shared-observability
 
 # Copy original datasource (unchanged business logic)
-COPY ../../datasource.py /app/datasource.py
+COPY datasource.py /app/datasource.py
 
 # Copy service code
-COPY server.py /app/server.py
+COPY apps/mcp-server/server.py /app/server.py
 
 # Set Python path to include shared packages
 ENV PYTHONPATH="/app:/app/packages/shared-config:/app/packages/shared-observability"

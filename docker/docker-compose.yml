@@ -130,19 +130,17 @@ services:
     depends_on:
       pubsub-emulator:
         condition: service_healthy
-    command: >
-      bash -c "
-        export PUBSUB_EMULATOR_HOST=pubsub-emulator:8085 &&
-        gcloud config set project local-project &&
-        gcloud pubsub topics create analysis-requests --project=local-project 2>/dev/null || true &&
-        gcloud pubsub topics create analysis-dlq --project=local-project 2>/dev/null || true &&
-        gcloud pubsub subscriptions create agent-worker-sub
-          --topic=analysis-requests
-          --project=local-project
-          --dead-letter-topic=analysis-dlq
-          --max-delivery-attempts=3 2>/dev/null || true &&
-        echo 'Pub/Sub topics and subscriptions created'
-      "
+    # Use curl REST API — idempotent (ignore 409 if already exists)
+    command:
+      - sh
+      - -c
+      - >-
+        curl -s -X PUT http://pubsub-emulator:8085/v1/projects/local-project/topics/analysis-requests ;
+        curl -s -X PUT http://pubsub-emulator:8085/v1/projects/local-project/topics/analysis-dlq ;
+        curl -s -X PUT http://pubsub-emulator:8085/v1/projects/local-project/subscriptions/agent-worker-sub
+        -H Content-Type:application/json
+        -d '{"topic":"projects/local-project/topics/analysis-requests","ackDeadlineSeconds":60}' ;
+        echo Pub/Sub ready
     restart: "no"
 
   # ---------------------------------------------------------------------------
@@ -168,7 +166,7 @@ services:
       retries: 5
 
   langfuse:
-    image: langfuse/langfuse:latest
+    image: langfuse/langfuse:2
     container_name: stock-agent-langfuse
     depends_on:
       langfuse-postgres:
@@ -180,14 +178,14 @@ services:
       NEXTAUTH_SECRET: local-secret-change-in-prod
       NEXTAUTH_URL: http://localhost:3000
       SALT: local-salt-change-in-prod
-      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      ENCRYPTION_KEY: 2de75fdb3d5237e1b42185d07f29fcbf22cb4812487b227189f793eda6479d5e
       LANGFUSE_INIT_ORG_ID: local-org
       LANGFUSE_INIT_ORG_NAME: "Stock Agent Demo"
       LANGFUSE_INIT_PROJECT_ID: local-project
       LANGFUSE_INIT_PROJECT_NAME: "Stock Analysis"
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-local
       LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-local
-      LANGFUSE_INIT_USER_EMAIL: admin@localhost
+      LANGFUSE_INIT_USER_EMAIL: admin@example.com
       LANGFUSE_INIT_USER_NAME: Admin
       LANGFUSE_INIT_USER_PASSWORD: admin123
     networks:
@@ -217,7 +215,7 @@ services:
     networks:
       - stock-agent-net
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8001/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -243,7 +241,7 @@ services:
     networks:
       - stock-agent-net
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -295,7 +293,7 @@ services:
     networks:
       - stock-agent-net
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8501/_stcore/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
       interval: 15s
       timeout: 5s
       retries: 3

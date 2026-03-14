@@ -181,9 +181,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("search_symbols", {"q": q})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        result = asyncio.get_event_loop().run_until_complete(
-            mcp.call("search", {"q": q})
-        )
+        result = asyncio.run(mcp.call("search", {"q": q}))
         if isinstance(result, list):
             lines = [f"• {r.get('symbol')}: {r.get('name')}" for r in result[:5] if r.get('symbol')]
             return "\n".join(lines) if lines else "No results found."
@@ -195,9 +193,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("latest_quote", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.get_event_loop().run_until_complete(
-            mcp.call("quote", {"symbol": symbol.upper()})
-        )
+        r = asyncio.run(mcp.call("quote", {"symbol": symbol.upper()}))
         if r.get("error"):
             return f"Error: {r['error']}"
         price = r.get("price")
@@ -217,9 +213,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("price_series", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        result = asyncio.get_event_loop().run_until_complete(
-            mcp.call("series", {"symbol": symbol.upper(), "lookback": 180})
-        )
+        result = asyncio.run(mcp.call("series", {"symbol": symbol.upper(), "lookback": 180}))
         if isinstance(result, list) and result:
             closes = [float(r.get("close", 0)) for r in result if r.get("close")]
             if closes:
@@ -241,9 +235,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("indicators", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.get_event_loop().run_until_complete(
-            mcp.call("indicators", {"symbol": symbol.upper()})
-        )
+        r = asyncio.run(mcp.call("indicators", {"symbol": symbol.upper()}))
         if r.get("error"):
             return f"Error: {r['error']}"
         rsi = r.get("rsi") or 0
@@ -262,9 +254,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("detect_events", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.get_event_loop().run_until_complete(
-            mcp.call("events", {"symbol": symbol.upper()})
-        )
+        r = asyncio.run(mcp.call("events", {"symbol": symbol.upper()}))
         if r.get("error"):
             return f"Error: {r['error']}"
         events = []
@@ -285,9 +275,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("explain", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.get_event_loop().run_until_complete(
-            mcp.call("explain", {"symbol": symbol.upper(), "tone": tone})
-        )
+        r = asyncio.run(mcp.call("explain", {"symbol": symbol.upper(), "tone": tone}))
         if r.get("error"):
             return f"Error: {r['error']}"
         return r.get("text", "No explanation available.")
@@ -572,7 +560,13 @@ async def process_job(message: PubSubMessage) -> bool:
     try:
         crew = build_crew(primary_symbol, request.query, mcp, guardrail)
         result = crew.kickoff()
-        result_text = str(result)
+        # Strip ANSI escape codes and control chars — CrewAI verbose output
+        # contains rich terminal formatting that breaks JSON serialization
+        import re as _re
+        _ansi = _re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        result_text = _ansi.sub('', str(result))
+        # Strip remaining ASCII control chars (keep \n \t)
+        result_text = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', result_text)
 
         # --- Guardrails Layer 3 (output) ---
         safe_output, output_events = guardrail.check_output(result_text)
@@ -657,12 +651,19 @@ async def run_pubsub_worker():
     log.info(f"Listening on {subscription_path}")
 
     def callback(pubsub_message):
+        """
+        Pub/Sub calls this in a ThreadPoolExecutor thread — there is NO
+        existing event loop in that thread. We must create one per message.
+        """
         try:
             data = json.loads(pubsub_message.data.decode("utf-8"))
             message = PubSubMessage.model_validate(data)
-            success = asyncio.get_event_loop().run_until_complete(
-                process_job(message)
-            )
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                success = loop.run_until_complete(process_job(message))
+            finally:
+                loop.close()
             if success:
                 pubsub_message.ack()
                 log.info("Message acknowledged", job_id=message.job_id)
@@ -706,14 +707,25 @@ async def analyze_sync(body: Dict[str, Any]):
       This is Stage 1 / Stage 2 mode — direct HTTP call, blocking.
       The frontend waits for this to complete.
       Use this for local dev; use Pub/Sub mode for production.
+
+      The job-api sends a full PubSubMessage envelope (contains job_id,
+      request, trace_id). We detect this and parse accordingly so that
+      job_id and trace_id are preserved end-to-end (visible in logs).
     """
     from models import AnalysisRequest
-    request = AnalysisRequest(**body)
-    message = PubSubMessage(
-        job_id=str(uuid.uuid4()),
-        request=request,
-        trace_id=str(uuid.uuid4()),
-    )
+
+    # job-api sends a PubSubMessage envelope: {job_id, request, trace_id, ...}
+    # Detect by presence of both "request" and "job_id" keys.
+    if "request" in body and "job_id" in body:
+        message = PubSubMessage.model_validate(body)
+    else:
+        # Fallback: plain AnalysisRequest body (manual curl / test calls)
+        request = AnalysisRequest(**body)
+        message = PubSubMessage(
+            job_id=str(uuid.uuid4()),
+            request=request,
+            trace_id=str(uuid.uuid4()),
+        )
     success = await process_job(message)
     return {"job_id": message.job_id, "success": success}
 
