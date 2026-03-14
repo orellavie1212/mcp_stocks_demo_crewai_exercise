@@ -246,13 +246,13 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         )
         if r.get("error"):
             return f"Error: {r['error']}"
-        rsi = r.get("rsi", 0)
+        rsi = r.get("rsi") or 0
         rsi_label = " (Overbought)" if rsi > 70 else " (Oversold)" if rsi < 30 else ""
         return (
             f"Technical Indicators for {symbol.upper()}:\n"
-            f"  Last Close: ${r.get('last_close', 0):.2f}\n"
-            f"  SMA(20): ${r.get('sma', 0):.2f}\n"
-            f"  EMA(50): ${r.get('ema', 0):.2f}\n"
+            f"  Last Close: ${(r.get('last_close') or 0):.2f}\n"
+            f"  SMA(20): ${(r.get('sma') or 0):.2f}\n"
+            f"  EMA(50): ${(r.get('ema') or 0):.2f}\n"
             f"  RSI(14): {rsi:.1f}{rsi_label}"
         )
 

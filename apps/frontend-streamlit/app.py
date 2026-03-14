@@ -402,7 +402,7 @@ Streamlit → Job API → Pub/Sub
             with st.expander(
                 f"{'✅' if job_data.get('status') == 'COMPLETED' else '❌'} "
                 f"{job_data.get('request', {}).get('query', 'Unknown query')[:60]}... "
-                f"| `{job_id[:12]}` | {job_data.get('latency_seconds', 0):.0f}s",
+                f"| `{job_id[:12]}` | {(job_data.get('latency_seconds') or 0):.0f}s",
                 expanded=(list(st.session_state.completed_jobs.keys())[-1] == job_id),
             ):
                 render_job_result(job_data)
