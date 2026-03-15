@@ -114,10 +114,10 @@ resource "google_pubsub_subscription" "agent_worker" {
     maximum_backoff = "600s"
   }
 
-  # Dead letter after 3 failed attempts
+  # Dead letter after 5 failed attempts (GCP minimum is 5)
   dead_letter_policy {
     dead_letter_topic     = google_pubsub_topic.analysis_dlq.id
-    max_delivery_attempts = 3
+    max_delivery_attempts = 5
   }
 
   depends_on = [google_project_service.apis]
@@ -170,10 +170,13 @@ resource "google_sql_database_instance" "langfuse" {
     }
 
     ip_configuration {
-      # Private IP only — more secure, no public exposure
-      ipv4_enabled    = false
-      private_network = google_compute_network.vpc.id
+      # Public IP — acceptable for demo; use private IP + Service Networking in production
+      ipv4_enabled    = true
     }
+  }
+  lifecycle {
+    # Ignore settings version mismatch on imported instances
+    ignore_changes = [settings]
   }
   depends_on = [google_project_service.apis]
 }
