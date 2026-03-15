@@ -136,6 +136,7 @@ class JobStatusResponse(BaseModel):
     completed_at: Optional[datetime] = None
     latency_seconds: Optional[float] = None
     attempt_count: int = 0
+    request: Optional["AnalysisRequest"] = None
     result: Optional[str] = None
     tool_trace: List["ToolCallRecord"] = Field(default_factory=list)
     usage: Optional["UsageRecord"] = None
@@ -155,6 +156,7 @@ class JobStatusResponse(BaseModel):
             completed_at=job.completed_at,
             latency_seconds=latency,
             attempt_count=job.attempt_count,
+            request=job.request,
             result=job.result,
             tool_trace=job.tool_trace,
             usage=job.usage,
