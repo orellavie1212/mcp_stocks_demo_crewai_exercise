@@ -43,5 +43,6 @@ USER appuser
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 \
     CMD python -c "print('worker healthy')"
 
-# Run in Pub/Sub mode by default (switch to http for local sync dev)
-CMD ["python", "worker.py", "--mode", "pubsub"]
+# Cloud Run sets PORT env var. In http mode, uvicorn uses it.
+# WORKER_MODE is overridden to "http" in Cloud Run deployment.
+CMD ["sh", "-c", "python worker.py --mode ${WORKER_MODE:-pubsub}"]

@@ -747,4 +747,6 @@ if __name__ == "__main__":
         asyncio.run(run_pubsub_worker())
     else:
         import uvicorn
-        uvicorn.run(http_app, host="0.0.0.0", port=8002)
+        # Cloud Run sets PORT env var; default to 8002 for local dev
+        port = int(os.getenv("PORT", "8002"))
+        uvicorn.run(http_app, host="0.0.0.0", port=port)
