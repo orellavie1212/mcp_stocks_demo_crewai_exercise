@@ -33,9 +33,6 @@ from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
-# ---------------------------------------------------------------------------
-# Bootstrap: add project root and packages to path
-# ---------------------------------------------------------------------------
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.join(_here, "..", "..")
 for _p in [_root, os.path.join(_root, "packages", "shared-config"),
@@ -54,11 +51,6 @@ _root_logger = setup_logging(
 )
 log = CorrelatedLogger("mcp-server")
 
-# ---------------------------------------------------------------------------
-# Datasource (same logic as original — yfinance backed)
-# ---------------------------------------------------------------------------
-# We import from the original datasource.py that lives at the repo root.
-# In production, this file is copied into the container at build time.
 _demo_root = os.path.join(_here, "..", "..")
 if _demo_root not in sys.path:
     sys.path.insert(0, _demo_root)
@@ -69,9 +61,6 @@ from datasource import (  # noqa: E402
     price_series as ds_series,
 )
 
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
 app = FastAPI(
     title="Stock MCP Server",
     version="2.0.0",
@@ -86,16 +75,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production via ingress
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Internal auth middleware
-# Teaching note: In production, use Cloud IAM + Workload Identity instead.
-# This simple token auth is for the classroom demo.
-# ---------------------------------------------------------------------------
 
 @app.middleware("http")
 async def auth_and_trace_middleware(request: Request, call_next):
@@ -104,16 +88,13 @@ async def auth_and_trace_middleware(request: Request, call_next):
     2. Validate internal token for all other endpoints.
     3. Inject trace_id from header (or generate new one).
     """
-    # Always allow health/ready
     if request.url.path in ("/health", "/ready", "/docs", "/openapi.json"):
         return await call_next(request)
 
-    # Extract trace_id from header (set by job-api when forwarding requests)
     trace_id = request.headers.get("X-Trace-ID", "")
     job_id = request.headers.get("X-Job-ID", "")
     set_correlation(trace_id=trace_id, job_id=job_id)
 
-    # Validate internal token (if auth enabled)
     if settings.api_auth_enabled:
         token = request.headers.get("X-Internal-Token", "")
         if token != settings.internal_api_token:
@@ -122,10 +103,6 @@ async def auth_and_trace_middleware(request: Request, call_next):
 
     return await call_next(request)
 
-
-# ---------------------------------------------------------------------------
-# Health endpoints (required by GCP load balancer)
-# ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
@@ -137,16 +114,11 @@ async def health():
 async def ready():
     """Readiness probe — is the service ready to accept traffic?"""
     try:
-        # Quick check: can we import datasource?
         ds_quote("AAPL")
         return {"status": "ready"}
     except Exception as e:
         return JSONResponse({"status": "not_ready", "error": str(e)}, status_code=503)
 
-
-# ---------------------------------------------------------------------------
-# Technical indicators (same logic, now a proper utility module)
-# ---------------------------------------------------------------------------
 
 def calc_sma(s: pd.Series, w: int = 20) -> pd.Series:
     return s.rolling(w, min_periods=max(3, w // 2)).mean()
@@ -192,10 +164,6 @@ def _coerce_close(df: pd.DataFrame) -> pd.Series:
     return pd.to_numeric(df["close"], errors="coerce").dropna()
 
 
-# ---------------------------------------------------------------------------
-# Request / Response schemas
-# ---------------------------------------------------------------------------
-
 class SearchRequest(BaseModel):
     q: str = Field(..., min_length=1, description="Company name or ticker")
 
@@ -225,10 +193,6 @@ class ExplainRequest(BaseModel):
     bullets: bool = Field(default=True)
 
 
-# ---------------------------------------------------------------------------
-# Tool implementations (instrument with logging)
-# ---------------------------------------------------------------------------
-
 def _timed_tool(tool_name: str, symbol: str, fn, *args, **kwargs) -> Any:
     """Execute a tool function with timing and logging."""
     start = time.perf_counter()
@@ -252,10 +216,6 @@ def _timed_tool(tool_name: str, symbol: str, fn, *args, **kwargs) -> Any:
         )
         raise
 
-
-# ---------------------------------------------------------------------------
-# API Endpoints
-# ---------------------------------------------------------------------------
 
 @app.post("/search")
 async def route_search(body: SearchRequest):
@@ -377,7 +337,6 @@ async def route_explain(body: ExplainRequest):
       This keeps LLM logic in one place and makes it observable.
     """
     try:
-        # Gather indicators + events (same as before)
         indicators_resp = await route_indicators(
             IndicatorsRequest(symbol=body.symbol)
         )
@@ -386,7 +345,6 @@ async def route_explain(body: ExplainRequest):
         ind = indicators_resp if isinstance(indicators_resp, dict) else {}
         evt = events_resp if isinstance(events_resp, dict) else {}
 
-        # Call Gemini (via shared-config factory)
         from config import get_llm
         llm = get_llm("main")
 
@@ -438,9 +396,6 @@ async def route_bundle(symbol: str, lookback: int = 180):
     return {"series": series, "indicators": indicators, "events": events}
 
 
-# ---------------------------------------------------------------------------
-# MCP server (for native MCP protocol clients)
-# ---------------------------------------------------------------------------
 mcp = FastMCP("stocks-analyzer")
 
 @mcp.tool()

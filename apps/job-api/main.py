@@ -35,9 +35,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-# ---------------------------------------------------------------------------
-# Path setup
-# ---------------------------------------------------------------------------
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.join(_here, "..", "..")
 for _p in [
@@ -61,9 +58,6 @@ settings = get_settings()
 setup_logging("job-api", settings.log_level, settings.log_format)
 log = CorrelatedLogger("job-api")
 
-# ---------------------------------------------------------------------------
-# FastAPI App
-# ---------------------------------------------------------------------------
 app = FastAPI(
     title="Stock Agent Job API",
     version="1.0.0",
@@ -80,9 +74,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Firestore client
-# ---------------------------------------------------------------------------
 
 def get_firestore():
     """
@@ -102,14 +93,10 @@ def get_firestore():
         log.warning("google-cloud-firestore not installed — using in-memory fallback")
         return None
     except Exception as e:
-        # No GCP credentials (local Docker without ADC) — fall back to in-memory
         log.warning(f"Firestore unavailable ({type(e).__name__}) — using in-memory fallback")
         return None
 
 
-# ---------------------------------------------------------------------------
-# In-memory fallback (for local dev without Firestore)
-# ---------------------------------------------------------------------------
 _IN_MEMORY_JOBS: Dict[str, Dict] = {}
 
 
@@ -158,10 +145,6 @@ async def update_job_status(job_id: str, updates: Dict[str, Any]):
         _IN_MEMORY_JOBS[job_id].update(updates)
 
 
-# ---------------------------------------------------------------------------
-# Pub/Sub publisher
-# ---------------------------------------------------------------------------
-
 def get_pubsub_publisher():
     """
     Return a Pub/Sub PublisherClient.
@@ -181,7 +164,7 @@ def get_pubsub_publisher():
         return None
 
 
-_IN_MEMORY_QUEUE = []  # Simple list for fallback
+_IN_MEMORY_QUEUE = []
 
 
 async def _call_agent_runtime_http(message: PubSubMessage):
@@ -224,7 +207,6 @@ async def _call_agent_runtime_http(message: PubSubMessage):
             job_id=message.job_id,
             agent_url=agent_url,
         )
-        # Mark the job as FAILED so the frontend doesn't poll forever
         await update_job_status(message.job_id, {
             "status": "FAILED",
             "last_error": f"Agent runtime unreachable: {e}",
@@ -266,13 +248,9 @@ async def publish_job(message: PubSubMessage) -> bool:
             return True
         except Exception as e:
             log.error(f"Pub/Sub publish failed: {e}", job_id=message.job_id)
-            # Fall through to HTTP fallback
 
-    # Fallback 1 (Lab 2): fire HTTP request to agent-runtime in background
     agent_url = settings.agent_runtime_url
     if agent_url and agent_url not in ("", "http://localhost:8002"):
-        # Only auto-dispatch if agent_runtime_url is explicitly configured
-        # (avoids accidental calls in plain local dev with no agent running)
         try:
             asyncio.create_task(_call_agent_runtime_http(message))
             log.info(
@@ -284,7 +262,6 @@ async def publish_job(message: PubSubMessage) -> bool:
         except Exception as e:
             log.warning(f"Could not dispatch to agent-runtime: {e}", job_id=message.job_id)
     elif agent_url == "http://localhost:8002":
-        # Lab 2: agent_runtime_url is the default local value — try it
         try:
             asyncio.create_task(_call_agent_runtime_http(message))
             log.info(
@@ -296,7 +273,6 @@ async def publish_job(message: PubSubMessage) -> bool:
         except Exception as e:
             log.warning(f"Could not dispatch to agent-runtime: {e}", job_id=message.job_id)
 
-    # Fallback 2: in-memory queue (nothing consumes this automatically)
     _IN_MEMORY_QUEUE.append(message.model_dump(mode="json"))
     log.warning(
         "Job queued in-memory (no Pub/Sub, no agent-runtime reachable) — "
@@ -305,10 +281,6 @@ async def publish_job(message: PubSubMessage) -> bool:
     )
     return False
 
-
-# ---------------------------------------------------------------------------
-# Rate limiting (Redis-backed)
-# ---------------------------------------------------------------------------
 
 async def check_rate_limit(user_id: str) -> bool:
     """
@@ -335,7 +307,7 @@ async def check_rate_limit(user_id: str) -> bool:
         key = f"rate_limit:{user_id}"
         count = await r.incr(key)
         if count == 1:
-            await r.expire(key, 60)  # First request — start the 60s window
+            await r.expire(key, 60)
         await r.aclose()
         if count > settings.rate_limit_rpm:
             log.warning(
@@ -347,13 +319,8 @@ async def check_rate_limit(user_id: str) -> bool:
             return False
         return True
     except Exception:
-        # If Redis is unavailable, allow the request (fail open)
         return True
 
-
-# ---------------------------------------------------------------------------
-# Request schemas
-# ---------------------------------------------------------------------------
 
 class SubmitRequest(BaseModel):
     query: str = Field(..., min_length=3, max_length=2000)
@@ -368,10 +335,6 @@ class JobSubmitResponse(BaseModel):
     message: str
     trace_id: str
 
-
-# ---------------------------------------------------------------------------
-# Idempotency check
-# ---------------------------------------------------------------------------
 
 async def find_existing_job(idempotency_key: str) -> Optional[str]:
     """Return existing job_id if the same idempotency_key was used before."""
@@ -402,10 +365,6 @@ async def store_idempotency(idempotency_key: str, job_id: str):
         pass
 
 
-# ---------------------------------------------------------------------------
-# Middleware
-# ---------------------------------------------------------------------------
-
 @app.middleware("http")
 async def trace_middleware(request: Request, call_next):
     trace_id = request.headers.get("X-Trace-ID") or str(uuid.uuid4())
@@ -414,10 +373,6 @@ async def trace_middleware(request: Request, call_next):
     response.headers["X-Trace-ID"] = trace_id
     return response
 
-
-# ---------------------------------------------------------------------------
-# Health
-# ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
@@ -428,10 +383,6 @@ async def health():
 async def ready():
     return {"status": "ready"}
 
-
-# ---------------------------------------------------------------------------
-# Submit a job
-# ---------------------------------------------------------------------------
 
 @app.post("/jobs", response_model=JobSubmitResponse, status_code=202)
 async def submit_job(body: SubmitRequest):
@@ -448,7 +399,6 @@ async def submit_job(body: SubmitRequest):
     """
     trace_id = get_trace_id()
 
-    # --- 1. Idempotency check ---
     if body.idempotency_key:
         existing_id = await find_existing_job(body.idempotency_key)
         if existing_id:
@@ -464,7 +414,6 @@ async def submit_job(body: SubmitRequest):
                 trace_id=trace_id,
             )
 
-    # --- 2. Rate limiting ---
     allowed = await check_rate_limit(body.user_id)
     if not allowed:
         raise HTTPException(
@@ -472,7 +421,6 @@ async def submit_job(body: SubmitRequest):
             detail=f"Rate limit exceeded: max {settings.rate_limit_rpm} requests/minute",
         )
 
-    # --- 3. Input guardrails ---
     guardrail = InputGuardrails(
         max_length=settings.guardrail_max_input_length,
         injection_detection=settings.guardrail_injection_detection,
@@ -494,7 +442,6 @@ async def submit_job(body: SubmitRequest):
             },
         )
 
-    # --- 4. Create job record ---
     analysis_request = AnalysisRequest(
         query=body.query,
         symbols=body.symbols,
@@ -508,10 +455,8 @@ async def submit_job(body: SubmitRequest):
 
     log.info("Job created", job_id=job.job_id, query=body.query[:80])
 
-    # --- 5. Persist to Firestore ---
     await save_job(job)
 
-    # --- 6. Publish to Pub/Sub ---
     message = PubSubMessage(
         job_id=job.job_id,
         request=analysis_request,
@@ -519,7 +464,6 @@ async def submit_job(body: SubmitRequest):
     )
     await publish_job(message)
 
-    # --- 7. Store idempotency key ---
     if body.idempotency_key:
         await store_idempotency(body.idempotency_key, job.job_id)
 
@@ -536,10 +480,6 @@ async def submit_job(body: SubmitRequest):
         trace_id=trace_id,
     )
 
-
-# ---------------------------------------------------------------------------
-# Get job status
-# ---------------------------------------------------------------------------
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
@@ -560,10 +500,6 @@ async def get_job(job_id: str):
     response = JobStatusResponse.from_job_record(job)
     return response.model_dump(mode="json")
 
-
-# ---------------------------------------------------------------------------
-# List recent jobs for a user
-# ---------------------------------------------------------------------------
 
 @app.get("/jobs")
 async def list_jobs(user_id: str = "anonymous", limit: int = 10):
@@ -586,7 +522,6 @@ async def list_jobs(user_id: str = "anonymous", limit: int = 10):
         except Exception as e:
             log.error(f"list_jobs failed: {e}")
 
-    # Fallback: return from in-memory
     jobs = [
         JobRecord.from_firestore(d)
         for d in _IN_MEMORY_JOBS.values()
@@ -598,10 +533,6 @@ async def list_jobs(user_id: str = "anonymous", limit: int = 10):
         for j in jobs[:limit]
     ]
 
-
-# ---------------------------------------------------------------------------
-# Internal: update job status (called by agent-runtime)
-# ---------------------------------------------------------------------------
 
 @app.patch("/jobs/{job_id}")
 async def update_job(

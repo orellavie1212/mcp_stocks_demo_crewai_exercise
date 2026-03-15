@@ -26,9 +26,6 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Dict, Generator, Optional
 
-# =============================================================================
-# Structured JSON Logger
-# =============================================================================
 
 class StructuredFormatter(logging.Formatter):
     """
@@ -59,33 +56,27 @@ class StructuredFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        # Correlation IDs
         if trace_id := getattr(record, "trace_id", None):
             log_object["trace_id"] = trace_id
         if job_id := getattr(record, "job_id", None):
             log_object["job_id"] = job_id
 
-        # Performance fields
         if duration_ms := getattr(record, "duration_ms", None):
             log_object["duration_ms"] = duration_ms
 
-        # Cost / token fields
         if tokens := getattr(record, "tokens_used", None):
             log_object["tokens_used"] = tokens
         if cost := getattr(record, "cost_usd", None):
             log_object["cost_usd"] = cost
 
-        # Tool tracing fields
         if tool_name := getattr(record, "tool_name", None):
             log_object["tool_name"] = tool_name
         if agent_name := getattr(record, "agent_name", None):
             log_object["agent_name"] = agent_name
 
-        # Exception info
         if record.exc_info:
             log_object["exception"] = self.formatException(record.exc_info)
 
-        # Any extra fields
         for key, value in record.__dict__.items():
             if key not in {
                 "name", "msg", "args", "levelname", "levelno", "pathname",
@@ -104,11 +95,11 @@ class TextFormatter(logging.Formatter):
     """Human-readable formatter for local development."""
 
     COLORS = {
-        "DEBUG": "\033[36m",    # Cyan
-        "INFO": "\033[32m",     # Green
-        "WARNING": "\033[33m",  # Yellow
-        "ERROR": "\033[31m",    # Red
-        "CRITICAL": "\033[35m", # Magenta
+        "DEBUG": "\033[36m",
+        "INFO": "\033[32m",
+        "WARNING": "\033[33m",
+        "ERROR": "\033[31m",
+        "CRITICAL": "\033[35m",
         "RESET": "\033[0m",
     }
 
@@ -142,7 +133,6 @@ def setup_logging(
     root = logging.getLogger()
     root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
-    # Remove existing handlers
     root.handlers.clear()
 
     handler = logging.StreamHandler(sys.stdout)
@@ -154,7 +144,6 @@ def setup_logging(
 
     root.addHandler(handler)
 
-    # Silence noisy libraries
     for lib in ("urllib3", "httpx", "httpcore", "google.auth", "grpc"):
         logging.getLogger(lib).setLevel(logging.WARNING)
 
@@ -168,11 +157,6 @@ def setup_logging(
     return ServiceAdapter(logger, {})
 
 
-# =============================================================================
-# Correlation context (trace_id, job_id)
-# =============================================================================
-
-# Thread-local / async-local correlation IDs
 import contextvars
 
 _trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -236,10 +220,6 @@ class CorrelatedLogger:
     def exception(self, msg: str, **kwargs):
         self._logger.exception(msg, extra=self._extra(**kwargs))
 
-
-# =============================================================================
-# Timing utilities
-# =============================================================================
 
 @contextmanager
 def timed(logger: CorrelatedLogger, operation: str, **extra) -> Generator:
@@ -312,10 +292,6 @@ def timed_fn(operation: str = "", **extra_kwargs):
     return decorator
 
 
-# =============================================================================
-# Langfuse integration (LLM call tracing)
-# =============================================================================
-
 class LangfuseTracer:
     """
     Wraps Langfuse to trace LLM calls with correlation to job IDs.
@@ -340,8 +316,6 @@ class LangfuseTracer:
         if enabled:
             try:
                 from langfuse import Langfuse
-                # Langfuse reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
-                # and LANGFUSE_HOST from environment automatically
                 self._client = Langfuse()
             except ImportError:
                 logging.warning(
@@ -389,9 +363,9 @@ class LangfuseTracer:
         try:
             from langfuse.callback import CallbackHandler
             return CallbackHandler(
-                public_key=None,   # reads from env
-                secret_key=None,   # reads from env
-                host=None,         # reads from env
+                public_key=None,
+                secret_key=None,
+                host=None,
                 session_id=get_job_id(),
                 trace_name="crew-run",
             )
@@ -433,10 +407,6 @@ class _NullTrace:
         pass
 
 
-# =============================================================================
-# OpenTelemetry (Cloud Trace)
-# =============================================================================
-
 def setup_tracing(service_name: str, gcp_project: str = ""):
     """
     Configure OpenTelemetry to export traces to GCP Cloud Trace.
@@ -461,15 +431,13 @@ def setup_tracing(service_name: str, gcp_project: str = ""):
         provider = TracerProvider(resource=resource)
 
         if gcp_project:
-            # Export to Cloud Trace (production)
             try:
                 from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
                 exporter = CloudTraceSpanExporter(project_id=gcp_project)
                 provider.add_span_processor(BatchSpanProcessor(exporter))
             except ImportError:
-                pass  # opentelemetry-exporter-gcp-trace not installed
+                pass
         else:
-            # Local: print to console
             from opentelemetry.sdk.trace.export import ConsoleSpanExporter
             provider.add_span_processor(
                 BatchSpanProcessor(ConsoleSpanExporter())
@@ -477,20 +445,13 @@ def setup_tracing(service_name: str, gcp_project: str = ""):
 
         trace.set_tracer_provider(provider)
     except ImportError:
-        pass  # OpenTelemetry not installed — tracing silently disabled
+        pass
 
 
-# =============================================================================
-# Gemini cost estimation (approximate)
-# =============================================================================
-
-# Approximate prices per 1M tokens (USD) as of early 2026
-# These are estimates — check https://cloud.google.com/vertex-ai/pricing for current rates
 GEMINI_PRICING = {
     "gemini-2.5-flash-lite": {"input": 0.075,  "output": 0.30},
     "gemini-2.5-flash":      {"input": 0.075,  "output": 0.30},
     "gemini-2.5-pro":        {"input": 1.25,   "output": 5.00},
-    # Fallback for unknown models
     "default":               {"input": 0.075,  "output": 0.30},
 }
 

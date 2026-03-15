@@ -15,23 +15,19 @@ import requests
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Callable
 
-# Import CrewAI components
 try:
     from crewai import Agent, Task, Crew, Process
     CREWAI_AVAILABLE = True
 except ImportError:
     CREWAI_AVAILABLE = False
 
-# Import CrewAI tools directly from MCP server
 try:
     from mcp_server import (
         get_tools_by_names,
         CREWAI_AVAILABLE as MCP_TOOLS_AVAILABLE,
     )
-    # Use MCP tools availability if CrewAI is available
     if CREWAI_AVAILABLE:
         CREWAI_AVAILABLE = MCP_TOOLS_AVAILABLE
-    # MCP API URL for reference
     MCP_API_URL = "http://127.0.0.1:8001"
 except ImportError:
     CREWAI_AVAILABLE = False
@@ -63,9 +59,6 @@ def create_agents(
     if not CREWAI_AVAILABLE:
         return {}
 
-    # Build a shared Gemini LLM instance using crewai.LLM (LiteLLM-backed)
-    # This is the pattern from https://ai.google.dev/gemini-api/docs/crewai-example
-    # LiteLLM uses GEMINI_API_KEY for the gemini/ model prefix — set it explicitly
     os.environ["GEMINI_API_KEY"] = gemini_api_key
     from crewai import LLM as CrewLLM
     gemini_llm = CrewLLM(
@@ -73,7 +66,6 @@ def create_agents(
         api_key=gemini_api_key,
         temperature=0.0)
  
-    # Default tools if not provided
     if research_tools is None:
         research_tools = ["search_symbols", "get_quote", "get_price_series"]
     if technical_tools is None:
@@ -83,13 +75,11 @@ def create_agents(
     if report_tools is None:
         report_tools = []
 
-    # Get tool functions from names
     research_tool_funcs = get_tools_by_names(research_tools, gemini_api_key)
     technical_tool_funcs = get_tools_by_names(technical_tools, gemini_api_key)
     sector_tool_funcs = get_tools_by_names(sector_tools, gemini_api_key)
     report_tool_funcs = get_tools_by_names(report_tools, gemini_api_key)
 
-    # Research Agent
     research_agent = Agent(
         role="Stock Research Specialist",
         goal="Gather comprehensive basic information about stocks including current quotes, historical data, and company details",
@@ -102,7 +92,6 @@ def create_agents(
         allow_delegation=False
     )
 
-    # Technical Analyst
     technical_agent = Agent(
         role="Technical Analysis Expert",
         goal="Perform detailed technical analysis using indicators, patterns, and market events to assess stock momentum and trends",
@@ -115,7 +104,6 @@ def create_agents(
         allow_delegation=False
     )
 
-    # Sector Analyst
     sector_agent = Agent(
         role="Sector Comparison Specialist",
         goal="Compare the target stock's performance, valuation, and fundamentals against its sector peers to identify relative strengths and weaknesses",
@@ -129,7 +117,6 @@ def create_agents(
         allow_delegation=False
     )
 
-    # Report Writer
     report_agent = Agent(
         role="Financial Report Writer",
         goal="Create comprehensive, well-structured investment reports that synthesize research, technical analysis, and sector comparison into actionable insights",
@@ -172,7 +159,6 @@ def create_tasks(
     if not CREWAI_AVAILABLE:
         return []
 
-    # Default tools if not provided
     if research_tools is None:
         research_tools = ["search_symbols", "get_quote", "get_price_series"]
     if technical_tools is None:
@@ -180,12 +166,10 @@ def create_tasks(
     if sector_tools is None:
         sector_tools = ["search_symbols", "get_quote", "get_indicators"]
 
-    # Get tool functions from names
     research_tool_funcs = get_tools_by_names(research_tools, gemini_api_key)
     technical_tool_funcs = get_tools_by_names(technical_tools, gemini_api_key)
     sector_tool_funcs = get_tools_by_names(sector_tools, gemini_api_key)
     
-    # Research Task - EXPLICITLY REQUIRES TOOL CALLS
     research_task = Task(
         description=f"""
         Conduct comprehensive research on the stock symbol '{symbol}'. 
@@ -212,7 +196,6 @@ def create_tasks(
         tools=research_tool_funcs
     )
     
-    # Technical Analysis Task - EXPLICITLY REQUIRES TOOL CALLS
     technical_task = Task(
         description=f"""
         Perform detailed technical analysis on '{symbol}' using the research data provided.
@@ -243,7 +226,6 @@ def create_tasks(
         context=[research_task]
     )
     
-    # Sector Comparison Task
     sector_task = Task(
         description=f"""
         Using the company information from the research analysis and technical indicators from the technical analysis, 
@@ -267,7 +249,6 @@ def create_tasks(
         context=[research_task, technical_task]
     )
     
-    # Report Task
     report_task = Task(
         description=f"""
         Create a comprehensive investment analysis report for '{symbol}' that synthesizes all research, technical analysis, and sector comparison. 
@@ -305,11 +286,9 @@ def run_crewai_analysis(
     if not CREWAI_AVAILABLE:
         return {"error": "CrewAI not available"}
 
-    # Validate and set Gemini API key
     gemini_api_key = gemini_api_key.strip() if gemini_api_key else ""
 
     if not gemini_api_key:
-        # Fallback to environment variable
         env_api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
         if env_api_key:
             gemini_api_key = env_api_key
@@ -321,33 +300,27 @@ def run_crewai_analysis(
                 "symbol": symbol
             }
 
-    # Set GOOGLE_API_KEY so langchain_google_genai can also pick it up from env
     os.environ["GOOGLE_API_KEY"] = gemini_api_key
 
     try:
-        # Clear tool trace at start of analysis
         from mcp_server import clear_tool_trace
         clear_tool_trace()
 
-        # Create agents
         if progress_callback:
             progress_callback("🔧 Creating agents...", 5)
 
         agents = create_agents(gemini_api_key, research_tools, technical_tools, sector_tools, report_tools)
 
-        # Create tasks
         if progress_callback:
             progress_callback("📋 Setting up tasks...", 8)
 
         tasks = create_tasks(symbol, gemini_api_key, research_tools, technical_tools, sector_tools)
         
-        # Assign agents to tasks
         tasks[0].agent = agents["research"]
         tasks[1].agent = agents["technical"]
         tasks[2].agent = agents["sector"]
         tasks[3].agent = agents["report"]
         
-        # Create crew
         if progress_callback:
             progress_callback("👥 Assembling crew...", 10)
         
@@ -358,15 +331,12 @@ def run_crewai_analysis(
             verbose=True
         )
         
-        # Execute analysis with detailed progress tracking
         if progress_callback:
             progress_callback("🚀 Starting comprehensive analysis...", 10)
         
-        # Use Crew's built-in execution instead of individual task execution
         if progress_callback:
             progress_callback("📊 Executing crew workflow...", 20)
         
-        # Test MCP API server connectivity
         if progress_callback:
             progress_callback("🔍 Testing MCP API connectivity...", 15)
         
@@ -377,45 +347,36 @@ def run_crewai_analysis(
         except Exception as e:
             raise Exception(f"MCP API server is not responding at {MCP_API_URL}. Please start the API server: uvicorn api:app --host 127.0.0.1 --port 8001")
         
-        # Note: OpenAI API key is now passed directly to tools instead of using environment variable
-        
-        # Execute the crew workflow
         if progress_callback:
             progress_callback("📊 Executing analysis...", 20)
         
-        # Add timeout protection for crew execution
         def timeout_handler():
             if verbose_callback:
                 verbose_callback("⏰ Crew execution timed out after 2 minutes")
             raise TimeoutError("Crew execution timed out")
         
-        # Set up timeout
-        timer = threading.Timer(120.0, timeout_handler)  # 2 minutes timeout
+        timer = threading.Timer(120.0, timeout_handler)
         timer.start()
         
         try:
-            # Update progress before crew execution
             if progress_callback:
                 progress_callback("🔄 Executing tasks...", 30)
             
-            # Capture CrewAI verbose output
             from io import StringIO
             
-            # Create a custom stdout/stderr capture
             class VerboseCapture:
                 def __init__(self, callback):
                     self.callback = callback
                     self.buffer = StringIO()
                 
                 def write(self, text):
-                    if text.strip():  # Only capture non-empty lines
+                    if text.strip():
                         self.callback(f"🤖 {text.strip()}")
                     return len(text)
                 
                 def flush(self):
                     pass
             
-            # Capture stdout during crew execution
             old_stdout = sys.stdout
             old_stderr = sys.stderr
                 
@@ -427,25 +388,21 @@ def run_crewai_analysis(
             
             result = crew.kickoff()
             
-            # Restore stdout/stderr
             if verbose_callback:
                 sys.stdout = old_stdout
                 sys.stderr = old_stderr
             
-            timer.cancel()  # Cancel timeout if successful
+            timer.cancel()
         except Exception as e:
-            # Restore stdout/stderr in case of error
             if verbose_callback:
                 sys.stdout = old_stdout
                 sys.stderr = old_stderr
-            timer.cancel()  # Cancel timeout on error
+            timer.cancel()
             raise e
         
-        # Final completion message
         if progress_callback:
             progress_callback("🎉 Analysis completed successfully!", 100)
         
-        # Get tool trace for verification
         from mcp_server import get_tool_trace
         tool_trace = get_tool_trace()
         
@@ -454,7 +411,7 @@ def run_crewai_analysis(
             "result": str(result),
             "timestamp": datetime.now().isoformat(),
             "symbol": symbol,
-            "tool_trace": tool_trace,  # Include tool call trace
+            "tool_trace": tool_trace,
             "tool_calls_count": len(tool_trace),
             "tool_calls_successful": sum(1 for t in tool_trace if t.get("success", False))
         }
@@ -467,4 +424,4 @@ def run_crewai_analysis(
             "symbol": symbol
         }
     finally:
-        pass  # GOOGLE_API_KEY set above is fine to leave in env for the session
+        pass

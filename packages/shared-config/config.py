@@ -28,20 +28,12 @@ class Settings(BaseSettings):
     In production, env vars are injected by Cloud Run / GKE from Secret Manager.
     """
 
-    # -------------------------------------------------------------------------
-    # GCP
-    # -------------------------------------------------------------------------
     gcp_project: str = Field(default="local-project", alias="GCP_PROJECT")
     gcp_region: str = Field(default="us-central1", alias="GCP_REGION")
 
-    # -------------------------------------------------------------------------
-    # LLM Provider
-    # Teaching note: switch between local dev (API key) and production (Vertex AI)
-    # -------------------------------------------------------------------------
     llm_provider: str = Field(default="google_ai_studio", alias="LLM_PROVIDER")
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
 
-    # Model routing — three tiers for cost control
     gemini_fast_model: str = Field(
         default="gemini-2.5-flash-lite", alias="GEMINI_FAST_MODEL",
         description="Cheap model for guardrails and routing (~$0.00 on free tier)"
@@ -55,13 +47,9 @@ class Settings(BaseSettings):
         description="Powerful model for final synthesis (used sparingly)"
     )
 
-    # LLM limits
     llm_max_tokens: int = Field(default=4096, alias="LLM_MAX_TOKENS")
     llm_timeout_seconds: int = Field(default=120, alias="LLM_TIMEOUT_SECONDS")
 
-    # -------------------------------------------------------------------------
-    # Service URLs
-    # -------------------------------------------------------------------------
     mcp_server_url: str = Field(
         default="http://localhost:8001", alias="MCP_SERVER_URL"
     )
@@ -72,18 +60,12 @@ class Settings(BaseSettings):
         default="http://localhost:8002", alias="AGENT_RUNTIME_URL"
     )
 
-    # -------------------------------------------------------------------------
-    # Redis
-    # -------------------------------------------------------------------------
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     redis_cache_ttl_seconds: int = Field(
         default=3600, alias="REDIS_CACHE_TTL_SECONDS",
         description="1 hour default cache for stock analysis results"
     )
 
-    # -------------------------------------------------------------------------
-    # Pub/Sub
-    # -------------------------------------------------------------------------
     pubsub_emulator_host: Optional[str] = Field(
         default=None, alias="PUBSUB_EMULATOR_HOST"
     )
@@ -101,9 +83,6 @@ class Settings(BaseSettings):
     )
     pubsub_max_retries: int = Field(default=3, alias="PUBSUB_MAX_RETRIES")
 
-    # -------------------------------------------------------------------------
-    # Firestore
-    # -------------------------------------------------------------------------
     firestore_project_id: str = Field(
         default="local-project", alias="FIRESTORE_PROJECT_ID"
     )
@@ -111,9 +90,6 @@ class Settings(BaseSettings):
         default=None, alias="FIRESTORE_EMULATOR_HOST"
     )
 
-    # -------------------------------------------------------------------------
-    # Langfuse (LLM observability)
-    # -------------------------------------------------------------------------
     langfuse_host: str = Field(
         default="http://localhost:3000", alias="LANGFUSE_HOST"
     )
@@ -125,18 +101,12 @@ class Settings(BaseSettings):
     )
     langfuse_enabled: bool = Field(default=True, alias="LANGFUSE_ENABLED")
 
-    # -------------------------------------------------------------------------
-    # Security
-    # -------------------------------------------------------------------------
     internal_api_token: str = Field(
         default="dev-token-change-in-production",
         alias="INTERNAL_API_TOKEN"
     )
     api_auth_enabled: bool = Field(default=False, alias="API_AUTH_ENABLED")
 
-    # -------------------------------------------------------------------------
-    # Guardrails
-    # -------------------------------------------------------------------------
     guardrail_max_input_length: int = Field(
         default=2000, alias="GUARDRAIL_MAX_INPUT_LENGTH"
     )
@@ -147,9 +117,6 @@ class Settings(BaseSettings):
         default=True, alias="GUARDRAIL_INJECTION_DETECTION"
     )
 
-    # -------------------------------------------------------------------------
-    # Rate limiting
-    # -------------------------------------------------------------------------
     rate_limit_rpm: int = Field(
         default=10, alias="RATE_LIMIT_RPM",
         description="Requests per minute per user"
@@ -158,9 +125,6 @@ class Settings(BaseSettings):
         default=100000, alias="RATE_LIMIT_TOKENS_PER_DAY"
     )
 
-    # -------------------------------------------------------------------------
-    # Observability
-    # -------------------------------------------------------------------------
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: str = Field(
         default="json", alias="LOG_FORMAT",
@@ -174,10 +138,6 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = False
         populate_by_name = True
-
-    # -------------------------------------------------------------------------
-    # Derived properties
-    # -------------------------------------------------------------------------
 
     @property
     def is_local(self) -> bool:
@@ -228,10 +188,6 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# =============================================================================
-# LLM Factory
-# =============================================================================
-
 def get_llm(tier: str = "main"):
     """
     Factory function that returns the appropriate LLM instance.
@@ -249,7 +205,6 @@ def get_llm(tier: str = "main"):
     model_name = settings.get_model(tier)
 
     if settings.use_vertex_ai:
-        # Production: uses GCP Workload Identity — no key in the container
         try:
             from langchain_google_vertexai import ChatVertexAI
             return ChatVertexAI(
@@ -265,7 +220,6 @@ def get_llm(tier: str = "main"):
                 "Run: pip install langchain-google-vertexai"
             )
     else:
-        # Local dev: uses Google AI Studio API key
         if not settings.gemini_api_key:
             raise ValueError(
                 "GEMINI_API_KEY is required when LLM_PROVIDER=google_ai_studio. "

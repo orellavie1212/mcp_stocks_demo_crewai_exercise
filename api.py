@@ -1,4 +1,3 @@
-# api.py
 from __future__ import annotations
 
 import json
@@ -10,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
-# Optional: auto-load .env so you don't need --env-file .env
 try:
     from dotenv import load_dotenv, find_dotenv  # type: ignore
     load_dotenv(find_dotenv(), override=False)
@@ -23,7 +21,6 @@ app = FastAPI(
     description="FastAPI bridge for MCP tools (Finnhub-backed): search, quote, series, indicators, events, explain.",
 )
 
-# Wide-open CORS for local dev / Streamlit
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,9 +28,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------
-# Utilities
-# ---------------------------
 
 def _tools():
     """Lazy import so the app can boot even if tools have a transient issue."""
@@ -57,9 +51,6 @@ def _error(name: str, message: str, status: int = 500, extra: Optional[Dict[str,
         data.update(extra)
     return JSONResponse(data, status_code=status)
 
-# ---------------------------
-# Schemas (request bodies)
-# ---------------------------
 
 class SearchBody(BaseModel):
     q: str = Field(..., min_length=1, description="Company name or ticker text")
@@ -100,9 +91,6 @@ class BundleBody(BaseModel):
     window_rsi: int = Field(14, ge=2, le=200)
     gemini_api_key: str = Field("", description="Gemini API key for LLM explanations")
 
-# ---------------------------
-# Health
-# ---------------------------
 
 @app.get("/")
 def root():
@@ -117,9 +105,6 @@ def root():
 def health():
     return {"status": "ok"}
 
-# ---------------------------
-# Routes (robust handlers)
-# ---------------------------
 
 @app.post("/search")
 async def route_search(body: SearchBody):

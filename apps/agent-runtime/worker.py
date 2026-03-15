@@ -37,9 +37,6 @@ from typing import Any, Dict, List, Optional
 import httpx
 from crewai import Agent, Crew, Process, Task
 
-# ---------------------------------------------------------------------------
-# Path setup
-# ---------------------------------------------------------------------------
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.join(_here, "..", "..")
 for _p in [
@@ -68,10 +65,6 @@ setup_logging("agent-runtime", settings.log_level, settings.log_format)
 log = CorrelatedLogger("agent-runtime")
 tracer = LangfuseTracer(enabled=settings.langfuse_enabled)
 
-
-# ===========================================================================
-# MCP Client — calls the MCP server over HTTP
-# ===========================================================================
 
 class MCPClient:
     """
@@ -158,10 +151,6 @@ class MCPClient:
     def clear_trace(self):
         self._tool_trace.clear()
 
-
-# ===========================================================================
-# CrewAI Tool wrappers (call MCP server via HTTP)
-# ===========================================================================
 
 def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
     """
@@ -283,10 +272,6 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
     return [search_symbols, latest_quote, price_series, indicators, detect_events, explain]
 
 
-# ===========================================================================
-# Crew builder
-# ===========================================================================
-
 def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipeline) -> Crew:
     """
     Build the 4-agent CrewAI crew.
@@ -300,19 +285,16 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
         except the report writer uses STRONG tier (gemini-2.5-pro)
     """
     tools = make_crewai_tools(mcp, guardrail)
-    research_tools = tools[:3]    # search_symbols, latest_quote, price_series
-    technical_tools = tools[3:]   # indicators, detect_events, explain
-    sector_tools = tools[:2] + [tools[3]]  # search, quote, indicators
+    research_tools = tools[:3]
+    technical_tools = tools[3:]
+    sector_tools = tools[:2] + [tools[3]]
 
-    # LLM instances — model routing happens here
-    main_llm = get_llm("main")      # gemini-2.5-flash
-    strong_llm = get_llm("strong")  # gemini-2.5-pro
+    main_llm = get_llm("main")
+    strong_llm = get_llm("strong")
 
-    # Langfuse callback for automatic LLM tracing
     langfuse_cb = tracer.get_callback()
     callbacks = [langfuse_cb] if langfuse_cb else []
 
-    # --- Agents ---
     research_agent = Agent(
         role="Stock Research Specialist",
         goal="Gather comprehensive information about stocks using real tool data",
@@ -361,13 +343,12 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
             "into clear, actionable reports. You never give investment advice — "
             "you present facts and analysis."
         ),
-        tools=[],  # Report writer synthesizes — no tools needed
-        llm=strong_llm,  # Use stronger model for final synthesis
+        tools=[],
+        llm=strong_llm,
         verbose=True,
         allow_delegation=False,
     )
 
-    # --- Tasks ---
     research_task = Task(
         description=(
             f"Research the stock '{symbol}' to answer: '{query}'\n"
@@ -423,10 +404,6 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
     )
 
 
-# ===========================================================================
-# Cache layer
-# ===========================================================================
-
 def _cache_key(query: str, symbols: List[str]) -> str:
     """Generate a deterministic cache key from query + symbols."""
     content = f"{query.lower().strip()}|{','.join(sorted(s.upper() for s in symbols))}"
@@ -461,10 +438,6 @@ async def set_cached_result(query: str, symbols: List[str], result: str):
         pass
 
 
-# ===========================================================================
-# Job status updates
-# ===========================================================================
-
 async def update_job(job_id: str, updates: Dict[str, Any]):
     """Send a PATCH request to the job-api to update job status."""
     try:
@@ -481,10 +454,6 @@ async def update_job(job_id: str, updates: Dict[str, Any]):
         log.warning(f"Job status update failed: {e}", job_id=job_id)
 
 
-# ===========================================================================
-# Main job processor
-# ===========================================================================
-
 async def process_job(message: PubSubMessage) -> bool:
     """
     Process a single analysis job.
@@ -494,7 +463,6 @@ async def process_job(message: PubSubMessage) -> bool:
     set_correlation(trace_id=message.trace_id, job_id=message.job_id)
     log.info("Processing job", job_id=message.job_id, attempt=message.attempt_number)
 
-    # --- Update status: RUNNING ---
     started_at = datetime.now(timezone.utc).isoformat()
     await update_job(message.job_id, {
         "status": "RUNNING",
@@ -502,7 +470,6 @@ async def process_job(message: PubSubMessage) -> bool:
         "attempt_count": message.attempt_number,
     })
 
-    # --- Check cache ---
     request = message.request
     symbols = request.symbols or [s.strip() for s in request.query.upper().split() if len(s) >= 2 and s.isalpha()]
     cached = await get_cached_result(request.query, symbols)
@@ -515,7 +482,6 @@ async def process_job(message: PubSubMessage) -> bool:
         log.info("Job completed from cache", job_id=message.job_id)
         return True
 
-    # --- Guardrails Layer 1 (input) ---
     guardrail = GuardrailPipeline(
         max_input_length=settings.guardrail_max_input_length,
         max_tool_calls=settings.guardrail_max_tool_calls,
@@ -542,12 +508,10 @@ async def process_job(message: PubSubMessage) -> bool:
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "guardrail_events": guardrail_events,
         })
-        return True  # Don't retry — permanent failure
+        return True
 
-    # --- Extract primary symbol ---
     primary_symbol = symbols[0] if symbols else "AAPL"
 
-    # --- Run crew ---
     mcp = MCPClient(settings.mcp_server_url)
     lf_trace = tracer.trace(
         name="crew-analysis",
@@ -565,11 +529,8 @@ async def process_job(message: PubSubMessage) -> bool:
     try:
         crew = build_crew(primary_symbol, request.query, mcp, guardrail)
         result = crew.kickoff()
-        # Strip ANSI escape codes and control chars — CrewAI verbose output
-        # contains rich terminal formatting that breaks JSON serialization
         result_text = _strip_ansi(str(result))
 
-        # --- Guardrails Layer 3 (output) ---
         safe_output, output_events = guardrail.check_output(result_text)
         guardrail_events += [
             {
@@ -581,13 +542,10 @@ async def process_job(message: PubSubMessage) -> bool:
             for r in output_events
         ]
 
-        # --- Cache the result ---
         await set_cached_result(request.query, symbols, safe_output)
 
-        # --- Build tool trace ---
         tool_trace = [t.model_dump(mode="json") for t in mcp.tool_trace]
 
-        # --- Update job: COMPLETED ---
         await update_job(message.job_id, {
             "status": "COMPLETED",
             "result": safe_output,
@@ -609,21 +567,16 @@ async def process_job(message: PubSubMessage) -> bool:
         tracer.flush()
 
         if message.attempt_number >= settings.pubsub_max_retries:
-            # Permanent failure — move to DLQ
             await update_job(message.job_id, {
                 "status": "FAILED",
                 "last_error": str(e),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "guardrail_events": guardrail_events,
             })
-            return True  # Ack the message (don't retry)
+            return True
 
-        return False  # NACK — Pub/Sub will redeliver
+        return False
 
-
-# ===========================================================================
-# Pub/Sub subscriber loop
-# ===========================================================================
 
 async def run_pubsub_worker():
     """
@@ -679,15 +632,11 @@ async def run_pubsub_worker():
     log.info("Worker started — waiting for messages")
 
     try:
-        streaming_pull_future.result()  # Block indefinitely
+        streaming_pull_future.result()
     except KeyboardInterrupt:
         streaming_pull_future.cancel()
         log.info("Worker stopped")
 
-
-# ===========================================================================
-# HTTP mode (for local dev / sync testing)
-# ===========================================================================
 
 from fastapi import FastAPI as _FastAPI
 
@@ -715,12 +664,9 @@ async def analyze_sync(body: Dict[str, Any]):
     """
     from models import AnalysisRequest
 
-    # job-api sends a PubSubMessage envelope: {job_id, request, trace_id, ...}
-    # Detect by presence of both "request" and "job_id" keys.
     if "request" in body and "job_id" in body:
         message = PubSubMessage.model_validate(body)
     else:
-        # Fallback: plain AnalysisRequest body (manual curl / test calls)
         request = AnalysisRequest(**body)
         message = PubSubMessage(
             job_id=str(uuid.uuid4()),
@@ -747,6 +693,5 @@ if __name__ == "__main__":
         asyncio.run(run_pubsub_worker())
     else:
         import uvicorn
-        # Cloud Run sets PORT env var; default to 8002 for local dev
         port = int(os.getenv("PORT", "8002"))
         uvicorn.run(http_app, host="0.0.0.0", port=port)

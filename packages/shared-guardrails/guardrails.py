@@ -22,10 +22,6 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# Guardrail result type
-# =============================================================================
-
 class GuardrailResult:
     """
     Result of a guardrail check.
@@ -58,12 +54,6 @@ class GuardrailResult:
         return f"GuardrailResult({self.decision}, check={self.check_name}, reason={self.reason!r})"
 
 
-# =============================================================================
-# Layer 1: Input guardrails
-# =============================================================================
-
-# Prompt injection patterns to detect
-# These patterns try to override the system prompt or manipulate the agent
 _INJECTION_PATTERNS = [
     r"ignore\s+(previous|all|prior)\s+(instructions|rules|prompts)",
     r"ignore\s+all\s+(previous|prior|above)\s+instructions",
@@ -86,7 +76,6 @@ _INJECTION_REGEX = re.compile(
     "|".join(_INJECTION_PATTERNS), re.IGNORECASE
 )
 
-# Supported intents (what we allow the agent to discuss)
 _STOCK_KEYWORDS = re.compile(
     r"\b(stock|share|ticker|symbol|price|market|portfolio|watchlist|"
     r"invest|financial|equity|sector|index|etf|fund|dividend|earnings|"
@@ -95,7 +84,6 @@ _STOCK_KEYWORDS = re.compile(
     re.IGNORECASE
 )
 
-# Stock ticker pattern (1-5 uppercase letters)
 _TICKER_PATTERN = re.compile(r"\b[A-Z]{1,5}\b")
 
 
@@ -125,17 +113,13 @@ class InputGuardrails:
         """
         results = []
 
-        # Check 1: Length
         results.append(self._check_length(query))
 
-        # Check 2: Empty / too short
         results.append(self._check_not_empty(query))
 
-        # Check 3: Prompt injection
         if self.injection_detection:
             results.append(self._check_injection(query))
 
-        # Check 4: Stock-related intent (optional — enables for production)
         if self.require_stock_intent:
             results.append(self._check_stock_intent(query))
 
@@ -176,8 +160,6 @@ class InputGuardrails:
 
     def _check_stock_intent(self, query: str) -> GuardrailResult:
         has_stock_keyword = bool(_STOCK_KEYWORDS.search(query))
-        # Check for tickers that are ALREADY uppercase in the original query
-        # (don't uppercase the whole string — every word would match)
         has_ticker = bool(_TICKER_PATTERN.search(query))
         if not (has_stock_keyword or has_ticker):
             return GuardrailResult(
@@ -191,11 +173,6 @@ class InputGuardrails:
         return GuardrailResult(allowed=True, check_name="stock_intent")
 
 
-# =============================================================================
-# Layer 2: Tool guardrails
-# =============================================================================
-
-# Valid tool names (agent cannot call anything outside this set)
 ALLOWED_TOOLS = {
     "search_symbols",
     "latest_quote",
@@ -205,10 +182,8 @@ ALLOWED_TOOLS = {
     "explain",
 }
 
-# Maximum tool calls per job (prevents runaway agents)
 DEFAULT_MAX_TOOL_CALLS = 30
 
-# Tools that require a valid stock symbol argument
 TOOLS_REQUIRING_SYMBOL = {
     "latest_quote", "price_series", "indicators", "detect_events", "explain"
 }
@@ -245,7 +220,6 @@ class ToolGuardrails:
     ) -> GuardrailResult:
         """Check a tool call before execution."""
 
-        # Check 1: Tool call count
         self._call_count += 1
         if self._call_count > self.max_tool_calls:
             return GuardrailResult(
@@ -258,7 +232,6 @@ class ToolGuardrails:
                 )
             )
 
-        # Check 2: Tool name is in allowlist
         if tool_name not in self.allowed_tools:
             return GuardrailResult(
                 allowed=False,
@@ -266,14 +239,12 @@ class ToolGuardrails:
                 reason=f"Tool '{tool_name}' is not in the allowed tool set"
             )
 
-        # Check 3: Symbol argument validation
         if tool_name in TOOLS_REQUIRING_SYMBOL:
             symbol = arguments.get("symbol", "").strip()
             result = self._validate_symbol(symbol, tool_name)
             if not result.allowed:
                 return result
 
-        # Check 4: No executable code in string arguments
         for key, value in arguments.items():
             if isinstance(value, str) and _INJECTION_REGEX.search(value):
                 return GuardrailResult(
@@ -291,7 +262,6 @@ class ToolGuardrails:
                 check_name="symbol_required",
                 reason=f"Tool '{tool_name}' requires a non-empty 'symbol' argument"
             )
-        # Symbols should be 1-10 alphanumeric characters
         if not re.match(r"^[A-Z0-9\.\-\^]{1,10}$", symbol.upper()):
             return GuardrailResult(
                 allowed=False,
@@ -312,11 +282,6 @@ class ToolGuardrails:
         return self._call_count
 
 
-# =============================================================================
-# Layer 3: Output guardrails
-# =============================================================================
-
-# Patterns that suggest hallucinated financial claims
 _PRICE_TARGET_PATTERNS = [
     r"(will|going to)\s+(reach|hit|go to|be at|rise to)\s+\$\d",
     r"price target\s+of\s+\$\d",
@@ -329,7 +294,6 @@ _PREDICTION_REGEX = re.compile(
     "|".join(_PRICE_TARGET_PATTERNS), re.IGNORECASE
 )
 
-# Financial disclaimer (appended to all outputs)
 FINANCIAL_DISCLAIMER = (
     "\n\n---\n"
     "⚠️ **Disclaimer**: This analysis is for educational and informational "
@@ -338,7 +302,6 @@ FINANCIAL_DISCLAIMER = (
     "Always consult a qualified financial advisor before making investment decisions."
 )
 
-# Patterns that might indicate leaked internal info
 _LEAK_PATTERNS = re.compile(
     r"(api_key|secret|password|token|bearer)\s*[=:]\s*\S+",
     re.IGNORECASE
@@ -379,18 +342,15 @@ class OutputGuardrails:
         results = []
         text = output
 
-        # Check 1: Redact leaked secrets
         if self.redact_secrets:
             cleaned, redact_result = self._redact_secrets(text)
             text = cleaned
             results.append(redact_result)
 
-        # Check 2: Flag hallucinated predictions
         if self.flag_predictions:
             prediction_result = self._check_predictions(text)
             results.append(prediction_result)
 
-        # Check 3: Add financial disclaimer
         if self.add_disclaimer:
             text = self._add_disclaimer(text)
             results.append(
@@ -419,7 +379,7 @@ class OutputGuardrails:
         match = _PREDICTION_REGEX.search(text)
         if match:
             return GuardrailResult(
-                allowed=True,  # Allow but flag — don't block the whole response
+                allowed=True,
                 check_name="prediction_flag",
                 reason=(
                     f"Output contains potential price prediction: '{match.group()[:80]}'. "
@@ -433,10 +393,6 @@ class OutputGuardrails:
             return text + FINANCIAL_DISCLAIMER
         return text
 
-
-# =============================================================================
-# Convenience: Full guardrail pipeline
-# =============================================================================
 
 class GuardrailPipeline:
     """
