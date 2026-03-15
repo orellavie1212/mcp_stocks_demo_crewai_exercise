@@ -239,7 +239,13 @@ async def publish_job(message: PubSubMessage) -> bool:
                 job_id=message.job_id,
                 trace_id=message.trace_id,
             )
-            msg_id = future.result(timeout=10)
+            # Teaching note (Lab 2 vs Lab 3):
+            #   timeout=5 s — if the Pub/Sub emulator host is a Docker service
+            #   name that's unresolvable in local-native (Lab 2) mode, gRPC
+            #   fails via DNS-NXDOMAIN quickly but we still cap at 5 s to be
+            #   safe.  For Lab 3/4 with a real emulator or GCP Pub/Sub this
+            #   completes in < 100 ms.
+            msg_id = future.result(timeout=5)
             log.info(
                 "Job published to Pub/Sub",
                 job_id=message.job_id,

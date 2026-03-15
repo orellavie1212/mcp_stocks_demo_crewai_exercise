@@ -38,7 +38,7 @@ help:  ## Show this help
 # Docker Compose helper — always load .env from repo root
 DC = docker compose --env-file .env -f docker/docker-compose.yml
 
-up: ## Start full local stack (all services + Redis + Pub/Sub emulator + Langfuse)
+lab3-up: ## Start full local stack (all services + Redis + Pub/Sub emulator + Langfuse)
 	$(DC) up --build -d
 	@echo ""
 	@echo "✅ Stack started:"
@@ -48,17 +48,48 @@ up: ## Start full local stack (all services + Redis + Pub/Sub emulator + Langfus
 	@echo "  Langfuse UI   : http://localhost:3000"
 	@echo ""
 
-down: ## Stop local stack
+lab3-down: ## Stop local stack
 	$(DC) down
 
 logs: ## Tail logs from all services
 	$(DC) logs -f
 
-restart: ## Restart a specific service (SERVICE=agent-runtime)
+lab3-restart: ## Restart a specific service (SERVICE=agent-runtime)
 	$(DC) restart $(SERVICE)
 
-up-simple: ## Start simplified stack (sync mode, no Pub/Sub, no Redis)
+lab3-up-simple: ## Start simplified stack (sync mode, no Pub/Sub, no Redis)
 	docker compose --env-file .env -f docker/docker-compose.simple.yml up --build -d
+
+# =============================================================================
+# LAB 2 — Native local dev (no Docker, direct HTTP between services)
+# Run each target in a separate terminal tab.
+# Order: lab2-mcp → lab2-api → lab2-worker → lab2-ui
+# =============================================================================
+
+lab2-mcp: ## Lab 2 ➊  MCP server on :8001  (open a new terminal first)
+	cd apps/mcp-server && \
+	  GEMINI_API_KEY=$(GEMINI_API_KEY) LOG_FORMAT=text \
+	  uvicorn server:app --host 0.0.0.0 --port 8001
+
+lab2-api: ## Lab 2 ➋  Job API on :8000  (open a new terminal)
+	cd apps/job-api && \
+	  GEMINI_API_KEY=$(GEMINI_API_KEY) \
+	  AGENT_RUNTIME_URL=http://localhost:8002 \
+	  LOG_FORMAT=text \
+	  uvicorn main:app --host 0.0.0.0 --port 8000
+
+lab2-worker: ## Lab 2 ➌  Agent-runtime worker (HTTP mode) on :8002  (open a new terminal)
+	cd apps/agent-runtime && \
+	  GEMINI_API_KEY=$(GEMINI_API_KEY) \
+	  MCP_SERVER_URL=http://localhost:8001 \
+	  JOB_API_URL=http://localhost:8000 \
+	  LOG_FORMAT=text \
+	  python worker.py --mode http
+
+lab2-ui: ## Lab 2 ➍  Streamlit frontend on :8501  (open a new terminal)
+	cd apps/frontend-streamlit && \
+	  JOB_API_URL=http://localhost:8000 \
+	  streamlit run app.py
 
 # =============================================================================
 # TESTING

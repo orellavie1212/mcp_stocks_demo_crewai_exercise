@@ -54,6 +54,15 @@ from observability import (
     setup_logging, CorrelatedLogger, LangfuseTracer,
     set_correlation, get_trace_id, get_job_id, estimate_cost,
 )
+
+# Langfuse decorators work without any LangChain dependency.
+# langfuse.callback.CallbackHandler is broken with langchain 1.x (missing
+# langchain.callbacks.base + langchain.schema.agent). Use @observe instead.
+try:
+    from langfuse.decorators import observe as _langfuse_observe, langfuse_context as _lf_ctx
+    _LANGFUSE_DECORATORS_OK = True
+except ImportError:
+    _LANGFUSE_DECORATORS_OK = False
 from models import (
     JobRecord, JobStatus, ToolCallRecord, UsageRecord, GuardrailEvent,
     GuardrailLayer, GuardrailDecision, PubSubMessage,
@@ -144,6 +153,51 @@ class MCPClient:
                 )
                 return {"error": str(e)}
 
+    def call_sync(self, tool: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Synchronous HTTP call for use inside CrewAI tool callbacks.
+
+        Teaching note:
+          CrewAI 1.x runs tool functions as plain sync callables inside a
+          ThreadPoolExecutor. The outer process_job() runs in an async event
+          loop, so asyncio.run() inside a tool raises:
+            'asyncio.run() cannot be called from a running event loop'
+          Solution: use httpx.Client (blocking) for the tool layer.
+          The outer async infrastructure (Redis, job-api PATCH, etc.) is
+          unaffected — only the per-tool MCP call uses sync I/O here.
+        """
+        start = time.perf_counter()
+        record = ToolCallRecord(tool_name=tool, arguments=payload)
+
+        with httpx.Client(timeout=self.timeout) as client:
+            try:
+                response = client.post(
+                    f"{self.base_url}/{tool}",
+                    json=payload,
+                    headers=self._make_headers(),
+                )
+                response.raise_for_status()
+                result = response.json()
+                duration_ms = (time.perf_counter() - start) * 1000
+
+                record.success = True
+                record.duration_ms = round(duration_ms, 1)
+                record.result_preview = str(result)[:300]
+                self._tool_trace.append(record)
+
+                log.info("MCP tool call succeeded", tool_name=tool, duration_ms=record.duration_ms)
+                return result
+
+            except Exception as e:
+                duration_ms = (time.perf_counter() - start) * 1000
+                record.success = False
+                record.error = str(e)
+                record.duration_ms = round(duration_ms, 1)
+                self._tool_trace.append(record)
+
+                log.error(f"MCP tool call failed: {e}", tool_name=tool, duration_ms=duration_ms)
+                return {"error": str(e)}
+
     @property
     def tool_trace(self) -> List[ToolCallRecord]:
         return list(self._tool_trace)
@@ -170,7 +224,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("search_symbols", {"q": q})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        result = asyncio.run(mcp.call("search", {"q": q}))
+        result = mcp.call_sync("search", {"q": q})
         if isinstance(result, list):
             lines = [f"• {r.get('symbol')}: {r.get('name')}" for r in result[:5] if r.get('symbol')]
             return "\n".join(lines) if lines else "No results found."
@@ -182,7 +236,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("latest_quote", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.run(mcp.call("quote", {"symbol": symbol.upper()}))
+        r = mcp.call_sync("quote", {"symbol": symbol.upper()})
         if r.get("error"):
             return f"Error: {r['error']}"
         price = r.get("price")
@@ -202,7 +256,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("price_series", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        result = asyncio.run(mcp.call("series", {"symbol": symbol.upper(), "lookback": 180}))
+        result = mcp.call_sync("series", {"symbol": symbol.upper(), "lookback": 180})
         if isinstance(result, list) and result:
             closes = [float(r.get("close", 0)) for r in result if r.get("close")]
             if closes:
@@ -224,7 +278,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("indicators", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.run(mcp.call("indicators", {"symbol": symbol.upper()}))
+        r = mcp.call_sync("indicators", {"symbol": symbol.upper()})
         if r.get("error"):
             return f"Error: {r['error']}"
         rsi = r.get("rsi") or 0
@@ -243,7 +297,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("detect_events", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.run(mcp.call("events", {"symbol": symbol.upper()}))
+        r = mcp.call_sync("events", {"symbol": symbol.upper()})
         if r.get("error"):
             return f"Error: {r['error']}"
         events = []
@@ -264,7 +318,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("explain", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = asyncio.run(mcp.call("explain", {"symbol": symbol.upper(), "tone": tone}))
+        r = mcp.call_sync("explain", {"symbol": symbol.upper(), "tone": tone})
         if r.get("error"):
             return f"Error: {r['error']}"
         return r.get("text", "No explanation available.")
@@ -272,7 +326,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
     return [search_symbols, latest_quote, price_series, indicators, detect_events, explain]
 
 
-def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipeline) -> Crew:
+def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipeline, lf_trace=None) -> Crew:
     """
     Build the 4-agent CrewAI crew.
 
@@ -283,6 +337,9 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
       - The Langfuse callback auto-traces every LLM call
       - Model routing: all agents use MAIN tier (gemini-2.5-flash)
         except the report writer uses STRONG tier (gemini-2.5-pro)
+
+      Pass lf_trace so the CrewAI LLM spans are nested under the
+      same job trace in Langfuse (visible as a single trace tree).
     """
     tools = make_crewai_tools(mcp, guardrail)
     research_tools = tools[:3]
@@ -292,7 +349,7 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
     main_llm = get_llm("main")
     strong_llm = get_llm("strong")
 
-    langfuse_cb = tracer.get_callback()
+    langfuse_cb = tracer.get_callback(trace=lf_trace)
     callbacks = [langfuse_cb] if langfuse_cb else []
 
     research_agent = Agent(
@@ -411,12 +468,24 @@ def _cache_key(query: str, symbols: List[str]) -> str:
 
 
 async def get_cached_result(query: str, symbols: List[str]) -> Optional[str]:
-    """Check Redis for a cached result. Returns None if not cached."""
+    """Check Redis for a cached result. Returns None if not cached.
+
+    Teaching note (Lab 2):
+      socket_connect_timeout + socket_timeout cap the TCP connect and command
+      round-trip to 3 s each.  asyncio.wait_for adds a hard outer limit of 5 s
+      so a slow DNS lookup (e.g. unresolvable Docker hostname 'redis' when
+      running lab 2 natively) can't stall process_job for 30-90 s.
+    """
     try:
         import redis.asyncio as aioredis
-        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        r = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
         key = _cache_key(query, symbols)
-        cached = await r.get(key)
+        cached = await asyncio.wait_for(r.get(key), timeout=5.0)
         await r.aclose()
         if cached:
             log.info("Cache hit — returning cached result", cache_key=key)
@@ -426,12 +495,25 @@ async def get_cached_result(query: str, symbols: List[str]) -> Optional[str]:
 
 
 async def set_cached_result(query: str, symbols: List[str], result: str):
-    """Store result in Redis with TTL."""
+    """Store result in Redis with TTL.
+
+    Teaching note (Lab 2):
+      Same timeout guards as get_cached_result — fail fast and silently when
+      Redis is unavailable (e.g. lab 2 running outside Docker).
+    """
     try:
         import redis.asyncio as aioredis
-        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        r = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
         key = _cache_key(query, symbols)
-        await r.setex(key, settings.redis_cache_ttl_seconds, result)
+        await asyncio.wait_for(
+            r.setex(key, settings.redis_cache_ttl_seconds, result),
+            timeout=5.0,
+        )
         await r.aclose()
         log.info("Result cached", cache_key=key, ttl=settings.redis_cache_ttl_seconds)
     except Exception:
@@ -527,8 +609,26 @@ async def process_job(message: PubSubMessage) -> bool:
         return _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
     try:
-        crew = build_crew(primary_symbol, request.query, mcp, guardrail)
-        result = crew.kickoff()
+        crew = build_crew(primary_symbol, request.query, mcp, guardrail, lf_trace=lf_trace)
+
+        # Use langfuse.decorators.observe for job-level tracing.
+        # langfuse.callback.CallbackHandler (LangChain-based) is broken with
+        # langchain 1.x — the decorators API works without any langchain dependency.
+        # This captures: input query, final output, total duration.
+        # Per-LLM-call prompts/tokens require Langfuse server v3 + SDK v3 + OTel.
+        if _LANGFUSE_DECORATORS_OK and settings.langfuse_enabled:
+            @_langfuse_observe(name="crew-analysis")
+            def _kickoff():
+                _lf_ctx.update_current_trace(
+                    session_id=message.job_id,
+                    user_id=request.user_id,
+                    metadata={"symbol": primary_symbol, "query": request.query},
+                )
+                return crew.kickoff()
+            result = _kickoff()
+        else:
+            result = crew.kickoff()
+
         result_text = _strip_ansi(str(result))
 
         safe_output, output_events = guardrail.check_output(result_text)

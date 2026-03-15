@@ -342,12 +342,12 @@ class LangfuseTracer:
             logging.warning(f"Langfuse trace failed: {e}")
             return _NullTrace()
 
-    def get_callback(self):
+    def get_callback(self, trace=None):
         """
         Returns a LangfuseCallbackHandler for CrewAI / LangChain.
 
         Plug this into CrewAI to auto-trace ALL LLM calls:
-            crew = Crew(..., callbacks=[tracer.get_callback()])
+            crew = Crew(..., callbacks=[tracer.get_callback(trace=lf_trace)])
 
         Teaching note:
           This callback intercepts every LLM call CrewAI makes and sends
@@ -357,18 +357,27 @@ class LangfuseTracer:
           - What Gemini responded
           - How many tokens it used (and estimated cost)
           - Which agent step triggered this call
+
+          IMPORTANT — two common mistakes:
+          1. Passing public_key=None / secret_key=None / host=None explicitly
+             OVERRIDES the env-var fallback in the SDK. Omit them entirely so
+             the SDK reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST.
+          2. Not passing `stateful_client=trace` means every crew run creates
+             an orphaned trace unlinked to the job trace you already started.
         """
         if not self.enabled or not self._client:
             return None
         try:
             from langfuse.callback import CallbackHandler
-            return CallbackHandler(
-                public_key=None,
-                secret_key=None,
-                host=None,
+            kwargs = dict(
                 session_id=get_job_id(),
                 trace_name="crew-run",
             )
+            # Link LLM spans to the existing job trace so they appear nested
+            # under the same trace in the Langfuse UI.
+            if trace is not None:
+                kwargs["stateful_client"] = trace
+            return CallbackHandler(**kwargs)
         except Exception as e:
             logging.warning(f"Langfuse callback init failed: {e}")
             return None
