@@ -320,10 +320,18 @@ async def check_rate_limit(user_id: str) -> bool:
       This is stateless from the application's perspective — any job-api
       pod can check any user's rate limit because Redis is shared.
       This is why you need a distributed cache, not just an in-memory dict.
+
+      socket_timeout / socket_connect_timeout = 3s:
+      Cloud Run does NOT have VPC access by default, so Memorystore Redis
+      (10.x.x.x) is unreachable. Without timeouts the TCP SYN hangs forever,
+      blocking the entire request. With 3s timeouts we fail-open in <3s.
     """
     try:
         import redis.asyncio as aioredis
-        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        r = aioredis.from_url(
+            settings.redis_url, decode_responses=True,
+            socket_timeout=3, socket_connect_timeout=3,
+        )
         key = f"rate_limit:{user_id}"
         count = await r.incr(key)
         if count == 1:
@@ -369,7 +377,10 @@ async def find_existing_job(idempotency_key: str) -> Optional[str]:
     """Return existing job_id if the same idempotency_key was used before."""
     try:
         import redis.asyncio as aioredis
-        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        r = aioredis.from_url(
+            settings.redis_url, decode_responses=True,
+            socket_timeout=3, socket_connect_timeout=3,
+        )
         existing = await r.get(f"idem:{idempotency_key}")
         await r.aclose()
         return existing
@@ -381,7 +392,10 @@ async def store_idempotency(idempotency_key: str, job_id: str):
     """Store idempotency_key → job_id mapping (TTL: 24h)."""
     try:
         import redis.asyncio as aioredis
-        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        r = aioredis.from_url(
+            settings.redis_url, decode_responses=True,
+            socket_timeout=3, socket_connect_timeout=3,
+        )
         await r.setex(f"idem:{idempotency_key}", 86400, job_id)
         await r.aclose()
     except Exception:

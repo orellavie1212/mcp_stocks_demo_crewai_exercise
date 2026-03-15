@@ -108,8 +108,18 @@ spec:
               value: "production"
             - name: LOG_FORMAT
               value: "json"
+            # Teaching note: google_ai_studio uses the Gemini API key (injected from
+            # K8s secret below). vertex_ai would need Workload Identity + langchain-
+            # google-vertexai, but newer CrewAI wraps LLMs via LiteLLM and doesn't
+            # understand ChatVertexAI objects — leading to "unknown object type" errors.
+            # google_ai_studio + GEMINI_API_KEY is simpler and equally capable.
             - name: LLM_PROVIDER
-              value: "vertex_ai"
+              value: "google_ai_studio"
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: stock-agent-secrets
+                  key: gemini_api_key
             - name: GCP_PROJECT
               valueFrom:
                 configMapKeyRef:

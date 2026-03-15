@@ -195,6 +195,14 @@ LF_ENCRYPTION_KEY=$(gcloud secrets versions access latest \
 INTERNAL_TOKEN=$(gcloud secrets versions access latest \
   --secret="internal-api-token" --project="$PROJECT_ID")
 
+# Read Gemini API key for GKE secret (needed by deployment.yaml)
+# Teaching note: get_llm() uses LangChain's ChatVertexAI for vertex_ai, but newer
+# CrewAI wraps LLMs via LiteLLM and doesn't understand langchain objects ("unknown
+# object type" error). google_ai_studio + GEMINI_API_KEY is fully compatible with
+# CrewAI's LiteLLM layer and requires no Workload Identity complexity.
+GEMINI_KEY_FOR_K8S=$(gcloud secrets versions access latest \
+  --secret="gemini-api-key" --project="$PROJECT_ID" 2>/dev/null || echo "")
+
 echo "  ✅ Secrets ready"
 
 # ---------------------------------------------------------------------------
@@ -236,11 +244,18 @@ MCP_URL=$(gcloud run services describe mcp-server --region="${REGION}" \
 echo "  ✅ MCP Server: ${MCP_URL}"
 
 # --- Job API ---
+# Teaching note: --network/--subnet/--vpc-egress (Direct VPC Egress, Cloud Run 2nd gen)
+#   Memorystore Redis lives at a private VPC IP (10.x.x.x).  Without this, Cloud Run
+#   has no route to the VPC and Redis TCP connections hang forever — breaking rate
+#   limiting and idempotency. private-ranges-only routes only RFC-1918 traffic (Redis)
+#   through the VPC; public traffic (Pub/Sub, Firestore, etc.) stays on the internet.
+#   No VPC connector resource needed — Direct VPC Egress is built into Cloud Run 2nd gen.
 gcloud run deploy job-api \
   --image="${AR_REPO}/job-api:latest" ${CF} \
   --service-account="job-api@${PROJECT_ID}.iam.gserviceaccount.com" \
   --set-env-vars="PUBSUB_PROJECT_ID=${PROJECT_ID},FIRESTORE_PROJECT_ID=${PROJECT_ID},REDIS_URL=${REDIS_URL},ENVIRONMENT=production,LOG_FORMAT=json" \
   --set-secrets="INTERNAL_API_TOKEN=internal-api-token:latest" \
+  --network=stock-agent-vpc --subnet=stock-agent-subnet --vpc-egress=private-ranges-only \
   --min-instances=1 --max-instances=3 --memory=256Mi --cpu=1
 
 JOB_API_URL=$(gcloud run services describe job-api --region="${REGION}" \
@@ -248,11 +263,13 @@ JOB_API_URL=$(gcloud run services describe job-api --region="${REGION}" \
 echo "  ✅ Job API: ${JOB_API_URL}"
 
 # --- Agent Runtime (Cloud Run, HTTP fallback mode) ---
+# Also needs VPC egress: agent-runtime caches LLM results in Redis (same 10.x.x.x host).
 gcloud run deploy agent-runtime \
   --image="${AR_REPO}/agent-runtime:latest" ${CF} \
   --service-account="agent-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
   --set-env-vars="WORKER_MODE=http,LLM_PROVIDER=vertex_ai,MCP_SERVER_URL=${MCP_URL},JOB_API_URL=${JOB_API_URL},PUBSUB_PROJECT_ID=${PROJECT_ID},FIRESTORE_PROJECT_ID=${PROJECT_ID},REDIS_URL=${REDIS_URL},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${REGION},ENVIRONMENT=production,LOG_FORMAT=json,LANGFUSE_ENABLED=true,LANGFUSE_PUBLIC_KEY=${LF_PUBLIC_KEY}" \
   --set-secrets="INTERNAL_API_TOKEN=internal-api-token:latest,LANGFUSE_SECRET_KEY=langfuse-secret-key:latest" \
+  --network=stock-agent-vpc --subnet=stock-agent-subnet --vpc-egress=private-ranges-only \
   --min-instances=1 --max-instances=3 --memory=2Gi --cpu=2 --timeout=600
 
 AGENT_URL=$(gcloud run services describe agent-runtime --region="${REGION}" \
@@ -356,10 +373,15 @@ kubectl create configmap stock-agent-config \
 echo "  ✅ ConfigMap ready"
 
 # K8s Secret from Secret Manager values
+# Teaching note: gemini_api_key is included so GKE pods can use google_ai_studio
+# LLM provider (LLM_PROVIDER=google_ai_studio in deployment.yaml). This avoids
+# the CrewAI + ChatVertexAI incompatibility — CrewAI's LiteLLM layer needs a
+# model string, not a langchain object.
 kubectl create secret generic stock-agent-secrets \
   --namespace=stock-agent \
   --from-literal=internal_api_token="${INTERNAL_TOKEN}" \
   --from-literal=langfuse_secret_key="${LF_SECRET_KEY}" \
+  ${GEMINI_KEY_FOR_K8S:+--from-literal=gemini_api_key="${GEMINI_KEY_FOR_K8S}"} \
   --dry-run=client -o yaml | kubectl apply -f -
 echo "  ✅ K8s Secret ready"
 

@@ -163,13 +163,18 @@ resource "google_firestore_database" "default" {
 # ---------------------------------------------------------------------------
 
 resource "google_redis_instance" "cache" {
-  name           = "stock-agent-cache"
-  tier           = "BASIC"   # No replicas for demo (use STANDARD_HA for production)
-  memory_size_gb = 1
-  region         = var.region
-  redis_version  = "REDIS_7_0"
-  display_name   = "Stock Agent Cache"
-  depends_on     = [google_project_service.apis]
+  name               = "stock-agent-cache"
+  tier               = "BASIC"   # No replicas for demo (use STANDARD_HA for production)
+  memory_size_gb     = 1
+  region             = var.region
+  redis_version      = "REDIS_7_0"
+  display_name       = "Stock Agent Cache"
+  # Teaching note: authorized_network MUST match the VPC used by GKE and Cloud Run.
+  # Without this it defaults to the GCP "default" VPC — a different network than
+  # stock-agent-vpc, so Cloud Run (with Direct VPC Egress) and GKE pods both fail
+  # to reach Redis even when egress routing is correctly configured.
+  authorized_network = google_compute_network.vpc.id
+  depends_on         = [google_project_service.apis]
 }
 
 # ---------------------------------------------------------------------------
