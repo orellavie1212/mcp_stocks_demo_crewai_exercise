@@ -235,7 +235,8 @@ resource "google_container_cluster" "agent_cluster" {
   location = var.region
 
   # Autopilot mode — Google manages all nodes
-  enable_autopilot = true
+  enable_autopilot     = true
+  deletion_protection  = false  # Allow terraform destroy
 
   network    = google_compute_network.vpc.name
   subnetwork = google_compute_subnetwork.subnet.name
