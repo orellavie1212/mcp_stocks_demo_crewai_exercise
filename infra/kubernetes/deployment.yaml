@@ -6,7 +6,15 @@
 #   HPA (Horizontal Pod Autoscaler) scales up when queue depth increases.
 #   Workload Identity means NO API keys in the container — GKE pod = GCP identity.
 #
-# Apply: kubectl apply -f infra/kubernetes/ -n stock-agent
+# Variables substituted by setup-gcp.sh / deploy-gke via envsubst:
+#   GCP_PROJECT  — GCP project ID
+#   GCP_REGION   — GCP region (e.g. us-central1)
+#   MCP_URL      — Cloud Run MCP server URL
+#   JOB_API_URL  — Cloud Run Job API URL
+#   REDIS_URL    — Redis URL (redis://HOST:PORT/0)
+#
+# Apply (via make deploy-gke — substitution happens automatically):
+#   envsubst < infra/kubernetes/deployment.yaml | kubectl apply -f - -n stock-agent
 # =============================================================================
 
 ---
@@ -19,15 +27,37 @@ metadata:
 
 ---
 # ServiceAccount with Workload Identity binding
-# Teaching note: This pod's SA = GCP SA "agent-runtime@PROJECT.iam.gserviceaccount.com"
-# No credentials needed in the container!
+# Teaching note:
+#   The annotation here links this K8s SA to the GCP SA provisioned by Terraform.
+#   The Terraform resource google_service_account_iam_member.workload_identity_agent
+#   must exist BEFORE pods start — it grants this K8s SA the right to impersonate
+#   the GCP SA. No credentials in the container at all.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: agent-runtime
   namespace: stock-agent
   annotations:
-    iam.gke.io/gcp-service-account: agent-runtime@GCP_PROJECT_PLACEHOLDER.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: agent-runtime@${GCP_PROJECT}.iam.gserviceaccount.com
+
+---
+# ConfigMap — non-sensitive configuration (filled by setup-gcp.sh at deploy time)
+# Teaching note:
+#   ConfigMaps are for non-secret config. Secrets go in K8s Secrets (below).
+#   Both are injected as env vars into the pod — the app sees no difference.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stock-agent-config
+  namespace: stock-agent
+data:
+  gcp_project: "${GCP_PROJECT}"
+  gcp_region: "${GCP_REGION}"
+  mcp_server_url: "${MCP_URL}"
+  job_api_url: "${JOB_API_URL}"
+  redis_url: "${REDIS_URL}"
+  langfuse_url: "${LANGFUSE_URL}"
+  langfuse_public_key: "${LANGFUSE_PUBLIC_KEY}"
 
 ---
 apiVersion: apps/v1
@@ -58,7 +88,7 @@ spec:
 
       containers:
         - name: worker
-          image: REGION-docker.pkg.dev/GCP_PROJECT_PLACEHOLDER/stock-agent/agent-runtime:latest
+          image: ${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/stock-agent/agent-runtime:latest
           imagePullPolicy: Always
 
           command: ["python", "worker.py", "--mode", "pubsub"]
@@ -115,7 +145,20 @@ spec:
                 configMapKeyRef:
                   name: stock-agent-config
                   key: gcp_project
-            # Secrets injected from Secret Manager via Kubernetes Secrets
+            # Langfuse observability — traces every LLM call
+            - name: LANGFUSE_ENABLED
+              value: "true"
+            - name: LANGFUSE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: langfuse_url
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: stock-agent-config
+                  key: langfuse_public_key
+            # Secrets injected from Kubernetes Secret (populated by setup-gcp.sh)
             - name: INTERNAL_API_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -148,7 +191,7 @@ spec:
 # HPA — Scale workers based on Pub/Sub queue depth
 # Teaching note:
 #   Scale UP when queue has > 5 unprocessed messages per pod
-#   Scale DOWN when queue is empty (scale to 1 minimum — keep warm)
+#   Scale DOWN when queue is empty (minReplicas=1 — keep one warm)
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -172,17 +215,3 @@ spec:
         target:
           type: AverageValue
           averageValue: "5"  # 1 new pod per 5 pending messages
-
----
-# ConfigMap (non-sensitive configuration)
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: stock-agent-config
-  namespace: stock-agent
-data:
-  gcp_project: "GCP_PROJECT_PLACEHOLDER"
-  gcp_region: "us-central1"
-  mcp_server_url: "https://mcp-server-HASH-uc.a.run.app"
-  job_api_url: "https://job-api-HASH-uc.a.run.app"
-  redis_url: "redis://10.0.0.10:6379/0"

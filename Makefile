@@ -18,11 +18,12 @@
 -include .env
 export
 
-GCP_PROJECT  ?= your-gcp-project-id
-GCP_REGION   ?= us-central1
-AR_REPO      ?= stock-agent
-AR_HOST      ?= $(GCP_REGION)-docker.pkg.dev
-IMAGE_PREFIX := $(AR_HOST)/$(GCP_PROJECT)/$(AR_REPO)
+GCP_PROJECT      ?= your-gcp-project-id
+GCP_REGION       ?= us-central1
+GEMINI_API_KEY   ?=
+AR_REPO          ?= stock-agent
+AR_HOST          ?= $(GCP_REGION)-docker.pkg.dev
+IMAGE_PREFIX     := $(AR_HOST)/$(GCP_PROJECT)/$(AR_REPO)
 
 SERVICES     := mcp-server job-api agent-runtime frontend-streamlit langfuse
 
@@ -114,15 +115,9 @@ infra-up: ## Provision full GCP infrastructure
 	  -var="region=$(GCP_REGION)"
 	@echo "✅ Infrastructure provisioned. Run 'make deploy-run' to deploy services."
 
-infra-down: ## DESTROY GCP infrastructure (stops billing — keeps Firestore/Pub/Sub)
-	@echo "⚠️  This will destroy GKE, Redis, and Cloud SQL. Firestore/Pub/Sub are kept."
-	@read -p "Are you sure? [y/N]: " confirm && [ "$$confirm" = "y" ]
-	cd infra/terraform && terraform destroy -auto-approve \
-	  -var="project_id=$(GCP_PROJECT)" \
-	  -var="region=$(GCP_REGION)" \
-	  -target=google_container_cluster.agent_cluster \
-	  -target=google_redis_instance.cache \
-	  -target=google_sql_database_instance.langfuse
+infra-down: ## Full GCP teardown — deletes ALL resources (Cloud Run x5, GKE, Redis, Cloud SQL, Pub/Sub, secrets)
+	chmod +x scripts/teardown-gcp.sh
+	./scripts/teardown-gcp.sh --project=$(GCP_PROJECT) --region=$(GCP_REGION)
 
 # =============================================================================
 # GCP DEPLOYMENT — CLOUD RUN (Stages 2-3)
@@ -135,11 +130,22 @@ deploy-run: build push ## Build, push, and deploy all services to Cloud Run
 # GCP DEPLOYMENT — GKE AUTOPILOT (Stage 4)
 # =============================================================================
 
-deploy-gke: push ## Deploy agent-runtime workers to GKE Autopilot
+deploy-gke: push ## Deploy agent-runtime workers to GKE Autopilot (uses envsubst to fill deployment.yaml variables)
 	gcloud container clusters get-credentials agent-cluster \
 	  --region=$(GCP_REGION) --project=$(GCP_PROJECT)
-	kubectl apply -f infra/kubernetes/
-	kubectl rollout status deployment/agent-runtime -n stock-agent
+	@echo "Reading Cloud Run URLs, Langfuse, and Redis from GCP..."
+	$(eval MCP_URL          := $(shell gcloud run services describe mcp-server  --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format="value(status.url)" 2>/dev/null))
+	$(eval JOB_API_URL      := $(shell gcloud run services describe job-api      --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format="value(status.url)" 2>/dev/null))
+	$(eval LANGFUSE_URL     := $(shell gcloud run services describe langfuse      --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format="value(status.url)" 2>/dev/null))
+	$(eval LANGFUSE_PK      := $(shell gcloud secrets versions access latest --secret=langfuse-public-key --project=$(GCP_PROJECT) 2>/dev/null))
+	$(eval REDIS_HOST       := $(shell cd infra/terraform && terraform output -raw redis_host 2>/dev/null))
+	$(eval REDIS_PORT       := $(shell cd infra/terraform && terraform output -raw redis_port 2>/dev/null || echo "6379"))
+	GCP_PROJECT=$(GCP_PROJECT) GCP_REGION=$(GCP_REGION) \
+	  MCP_URL=$(MCP_URL) JOB_API_URL=$(JOB_API_URL) \
+	  REDIS_URL=redis://$(REDIS_HOST):$(REDIS_PORT)/0 \
+	  LANGFUSE_URL=$(LANGFUSE_URL) LANGFUSE_PUBLIC_KEY=$(LANGFUSE_PK) \
+	  envsubst < infra/kubernetes/deployment.yaml | kubectl apply -f -
+	kubectl rollout status deployment/agent-runtime -n stock-agent --timeout=300s
 
 scale-workers: ## Scale agent-runtime workers (REPLICAS=5)
 	kubectl scale deployment/agent-runtime -n stock-agent --replicas=$(REPLICAS)
@@ -148,8 +154,20 @@ scale-workers: ## Scale agent-runtime workers (REPLICAS=5)
 # SECRETS & SETUP
 # =============================================================================
 
-setup-gcp: ## One-command GCP project setup (run once per project)
-	./scripts/setup-gcp.sh --project=$(GCP_PROJECT) --region=$(GCP_REGION)
+setup-gcp: ## One-command GCP project setup — provisions infra, builds images, deploys Cloud Run + GKE (run once)
+	chmod +x scripts/setup-gcp.sh scripts/teardown-gcp.sh scripts/deploy-cloud-run.sh
+	./scripts/setup-gcp.sh \
+	  --project=$(GCP_PROJECT) \
+	  --region=$(GCP_REGION) \
+	  --gemini-api-key=$(GEMINI_API_KEY)
+
+teardown: ## DESTROY all GCP resources and start from zero (deletes Cloud Run, GKE, Redis, SQL, Pub/Sub, secrets)
+	chmod +x scripts/teardown-gcp.sh
+	./scripts/teardown-gcp.sh --project=$(GCP_PROJECT) --region=$(GCP_REGION)
+
+teardown-yes: ## Non-interactive full teardown (for CI/automation)
+	chmod +x scripts/teardown-gcp.sh
+	./scripts/teardown-gcp.sh --project=$(GCP_PROJECT) --region=$(GCP_REGION) --yes
 
 seed-secrets: ## Seed Secret Manager with values from .env.production
 	./scripts/seed-secrets.sh --project=$(GCP_PROJECT)

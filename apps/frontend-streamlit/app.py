@@ -72,7 +72,9 @@ if "completed_jobs" not in st.session_state:
 
 def check_job_api() -> bool:
     try:
-        r = requests.get(f"{JOB_API_URL}/health", timeout=3)
+        # Teaching note: Cloud Run min-instances=0 means cold starts up to ~10s.
+        # Use a generous timeout so the sidebar doesn't flash "unreachable" on wake-up.
+        r = requests.get(f"{JOB_API_URL}/health", timeout=15)
         return r.status_code == 200
     except Exception:
         return False
@@ -89,7 +91,7 @@ def submit_job(query: str, symbols: list, user_id: str) -> Optional[Dict]:
                 "user_id": user_id,
                 "idempotency_key": str(uuid.uuid4()),
             },
-            timeout=10,
+            timeout=30,  # Cloud Run cold start can take up to ~20s
         )
         if response.status_code in (200, 202):
             return response.json()
