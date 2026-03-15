@@ -191,7 +191,12 @@ services:
     networks:
       - stock-agent-net
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/health"]
+      # Teaching note:
+      #   Next.js 14 binds to the container's hostname (e.g. 57e6027595ec:3000),
+      #   NOT localhost — so "wget http://localhost:3000" gets Connection Refused
+      #   from inside the container even though the service is fully running.
+      #   Fix: use $(hostname) which resolves to the container's Docker network IP.
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health"]
       interval: 15s
       timeout: 5s
       retries: 10
