@@ -9,10 +9,9 @@ python-dotenv>=1.0
 streamlit>=1.36
 fastmcp>=0.2.5
 matplotlib
-openai>=1.0
 
-# CrewAI dependencies
+# CrewAI + Gemini (Lab 1 — original demo on Gemini)
 crewai>=0.28.0
 langchain>=0.1.0
-langchain-openai>=0.1.0
+langchain-google-genai>=1.0.0
 

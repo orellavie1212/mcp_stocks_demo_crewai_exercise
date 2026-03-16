@@ -1,0 +1,185 @@
+# =============================================================================
+# CI/CD Pipeline — GitHub Actions
+# =============================================================================
+# Teaching note:
+#   Every push to main:
+#   1. Runs tests (fast, <2 min)
+#   2. Lints code
+#   3. Builds Docker images
+#   4. Pushes to Artifact Registry
+#   5. Deploys to Cloud Run
+#
+#   Required GitHub Secrets:
+#     GCP_PROJECT         — your GCP project ID
+#     GCP_SA_KEY          — service account JSON key with AR + Cloud Run permissions
+#     GEMINI_API_KEY      — for running integration tests
+#
+#   Or use Workload Identity Federation (preferred — no long-lived keys)
+# =============================================================================
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GCP_REGION: us-central1
+  AR_HOST: us-central1-docker.pkg.dev
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Test + Lint (runs on every PR and push)
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          pip install pytest pydantic pydantic-settings ruff
+
+      - name: Lint with ruff
+        run: |
+          ruff check packages/ apps/ tests/ --ignore E501,W503
+
+      - name: Run unit tests — guardrails
+        run: |
+          PYTHONPATH=packages/shared-models:packages/shared-config:packages/shared-observability:packages/shared-guardrails \
+          python -m pytest tests/unit/test_guardrails/ -v
+
+      - name: Run unit tests — models
+        run: |
+          PYTHONPATH=packages/shared-models \
+          python -m pytest tests/unit/test_models/ -v
+
+      - name: Run unit tests — MCP server tools
+        run: |
+          PYTHONPATH=packages/shared-models:packages/shared-config:packages/shared-observability:. \
+          python -m pytest tests/unit/test_mcp_server/ -v
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Build + Push Docker images (only on push to main)
+  # ---------------------------------------------------------------------------
+  build-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
+
+      - name: Set image prefix
+        run: echo "IMAGE_PREFIX=${{ env.AR_HOST }}/${{ secrets.GCP_PROJECT }}/stock-agent" >> $GITHUB_ENV
+
+      - name: Build and push mcp-server
+        run: |
+          docker build -t $IMAGE_PREFIX/mcp-server:${{ github.sha }} \
+            -t $IMAGE_PREFIX/mcp-server:latest \
+            -f apps/mcp-server/Dockerfile .
+          docker push $IMAGE_PREFIX/mcp-server:${{ github.sha }}
+          docker push $IMAGE_PREFIX/mcp-server:latest
+
+      - name: Build and push job-api
+        run: |
+          docker build -t $IMAGE_PREFIX/job-api:${{ github.sha }} \
+            -t $IMAGE_PREFIX/job-api:latest \
+            -f apps/job-api/Dockerfile .
+          docker push $IMAGE_PREFIX/job-api:${{ github.sha }}
+          docker push $IMAGE_PREFIX/job-api:latest
+
+      - name: Build and push agent-runtime
+        run: |
+          docker build -t $IMAGE_PREFIX/agent-runtime:${{ github.sha }} \
+            -t $IMAGE_PREFIX/agent-runtime:latest \
+            -f apps/agent-runtime/Dockerfile .
+          docker push $IMAGE_PREFIX/agent-runtime:${{ github.sha }}
+          docker push $IMAGE_PREFIX/agent-runtime:latest
+
+      - name: Build and push frontend-streamlit
+        run: |
+          docker build -t $IMAGE_PREFIX/frontend-streamlit:${{ github.sha }} \
+            -t $IMAGE_PREFIX/frontend-streamlit:latest \
+            -f apps/frontend-streamlit/Dockerfile .
+          docker push $IMAGE_PREFIX/frontend-streamlit:${{ github.sha }}
+          docker push $IMAGE_PREFIX/frontend-streamlit:latest
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Deploy to Cloud Run (only on push to main)
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set image prefix
+        run: echo "IMAGE_PREFIX=${{ env.AR_HOST }}/${{ secrets.GCP_PROJECT }}/stock-agent" >> $GITHUB_ENV
+
+      - name: Deploy mcp-server
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: mcp-server
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE_PREFIX }}/mcp-server:${{ github.sha }}
+
+      - name: Deploy job-api
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: job-api
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE_PREFIX }}/job-api:${{ github.sha }}
+
+      - name: Deploy agent-runtime
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: agent-runtime
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE_PREFIX }}/agent-runtime:${{ github.sha }}
+
+      - name: Deploy frontend-streamlit
+        uses: google-github-actions/deploy-cloudrun@v2
+        id: deploy-frontend
+        with:
+          service: frontend-streamlit
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE_PREFIX }}/frontend-streamlit:${{ github.sha }}
+
+      - name: Print deployment URL
+        run: echo "Frontend deployed to ${{ steps.deploy-frontend.outputs.url }}"

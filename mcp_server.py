@@ -1,4 +1,3 @@
-# mcp_server.py
 from __future__ import annotations
 
 import json
@@ -11,7 +10,6 @@ from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
 
-# Import CrewAI tool decorator
 try:
     from crewai.tools import tool
     CREWAI_AVAILABLE = True
@@ -23,7 +21,6 @@ except ImportError:
             return func
         return decorator
 
-# Tool call tracing
 TOOL_TRACE: List[Dict[str, Any]] = []
 
 def _log_tool_call(tool_name: str, arguments: Dict[str, Any], start_time: float, 
@@ -50,7 +47,6 @@ def clear_tool_trace():
     """Clear the tool call trace"""
     TOOL_TRACE.clear()
 
-# yfinance-backed datasource functions (your updated datasource.py)
 from datasource import (
     search_symbols as ds_search,
     latest_quote as ds_quote,
@@ -59,7 +55,6 @@ from datasource import (
 
 mcp = FastMCP("stocks-analyzer")
 
-# ---------- indicators & helpers ----------
 def calc_sma(s: pd.Series, w: int = 20) -> pd.Series:
     """Calculate Simple Moving Average (SMA) for a given series.
     
@@ -215,7 +210,7 @@ def _coerce_close(df: pd.DataFrame) -> pd.Series:
         return pd.Series(dtype="float64")
     return pd.to_numeric(df["close"], errors="coerce").dropna()
 
-# ---------- MCP tools ----------
+
 @mcp.tool()
 def search_symbols(query: str) -> str:
     """Symbol lookup by company name/ticker. Returns a JSON array."""
@@ -231,13 +226,12 @@ def latest_quote(symbol: str) -> str:
         return json.dumps(ds_quote(symbol), ensure_ascii=False)
     except Exception as e:
         return json.dumps({"symbol": symbol, "error": "quote_failed", "message": str(e)})
-# mcp_server.py -> price_series tool
+
 @mcp.tool()
 def price_series(symbol: str, interval: str = "daily", lookback: int = 180) -> str:
     """OHLCV series as a JSON array (date ISO)."""
     try:
         df = ds_series(symbol, interval, lookback)
-        # Guarantee expected columns even if empty
         for col in ["date", "open", "high", "low", "close", "volume"]:
             if col not in df.columns:
                 df[col] = pd.Series(dtype="float64" if col != "date" else "datetime64[ns]")
@@ -279,7 +273,6 @@ def detect_events(symbol: str) -> str:
         df = ds_series(symbol, "daily", 400)
         if df is None or df.empty:
             return json.dumps({"symbol": symbol, "error": "no_data", "message": f"No data available for symbol {symbol}"})
-        # ensure numeric
         for c in ["open", "high", "low", "close", "volume"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -313,11 +306,12 @@ def explain(
     risk_profile: str = "balanced",
     horizon_days: int = 30,
     bullets: bool = True,
-    openai_api_key: str = "",
+    gemini_api_key: str = "",
 ) -> str:
     """
     LLM explanation of the current technical snapshot with guardrails.
     Returns a JSON object: {"text": "...", "rationale": [...], "disclaimers": "..."}.
+    Uses Gemini (gemini-2.5-flash) instead of OpenAI.
     """
     import json as _json
 
@@ -327,91 +321,65 @@ def explain(
         except Exception:
             return {}
 
-    # Check for required API key
-    if not openai_api_key:
+    if not gemini_api_key:
         return json.dumps({
-            "error": "openai_api_key_required", 
-            "message": "OpenAI API key is required for LLM explanations"
+            "error": "gemini_api_key_required",
+            "message": "Gemini API key is required for LLM explanations"
         })
 
-    # Gather fresh local context (no external calls here)
     ind = _safe_json(indicators(symbol))
     evt = _safe_json(detect_events(symbol))
 
-    # LLM path with strict guardrails and JSON schema
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=openai_api_key)
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-        # System message
-        system_msg = (
-            "You are an impartial market analyst. Summarize technical signals clearly, "
-            "avoid predictions and avoid financial advice. Use short, concrete language. "
-            "If inputs are missing, acknowledge uncertainty. Output in the requested language."
-        )
-
-        # User prompt with all context (indicators + events + knobs)
-        prompt = {
-            "symbol": symbol,
-            "language": language,
-            "tone": tone,
-            "risk_profile": risk_profile,
-            "horizon_days": horizon_days,
-            "bullets": bool(bullets),
-            "indicators": ind,
-            "events": evt,
-            "instructions": [
-                "Keep it under ~120 words if bullets=False, or 3-5 bullets if bullets=True.",
-                "No investment advice. No price targets.",
-                "Explain what each signal implies in plain language.",
-                "If RSI or MAs are missing, say so briefly.",
-                "Mention 52-week context if flagged."
-            ],
-        }
-
-        # JSON schema for structured output
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "tech_summary",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "rationale": {"type": "array", "items": {"type": "string"}},
-                        "disclaimers": {"type": "string"}
-                    },
-                    "required": ["text", "disclaimers"]
-                }
-            },
-        }
-
-        # Compose messages + call
-        msgs = [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": f"Generate a technical summary:\n{json.dumps(prompt, ensure_ascii=False)}"},
-        ]
-
-        r = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=msgs,
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=gemini_api_key,
             temperature=0.2,
-            response_format=response_format,
         )
-        content = (r.choices[0].message.content or "").strip()
-        # If model didn't honor JSON schema, wrap as text
+
+        bullet_note = "Return 3-5 bullet points." if bullets else "Return 2-3 short paragraphs."
+        prompt_text = (
+            f"You are an impartial market analyst. Analyze the technical data below for {symbol}.\n"
+            f"Language: {language} | Tone: {tone} | Risk profile: {risk_profile} | "
+            f"Horizon: {horizon_days} days\n\n"
+            f"Indicators: {json.dumps(ind, ensure_ascii=False)}\n"
+            f"Events: {json.dumps(evt, ensure_ascii=False)}\n\n"
+            f"Rules:\n"
+            f"- {bullet_note}\n"
+            f"- No investment advice, no price targets.\n"
+            f"- If a value is missing, acknowledge it briefly.\n"
+            f"- Mention 52-week context if flagged.\n\n"
+            f"Return ONLY this valid JSON (no markdown fences):\n"
+            f'{{ "text": "...", "rationale": ["..."], "disclaimers": "Not investment advice." }}'
+        )
+
+        response = llm.invoke(prompt_text)
+        content = (response.content or "").strip()
+
+        if content.startswith("```"):
+            parts = content.split("```")
+            content = parts[1] if len(parts) > 1 else content
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+
         try:
             _ = json.loads(content)
             return content
         except Exception:
-            return json.dumps({"text": content or "", "disclaimers": "Not investment advice."}, ensure_ascii=False)
+            return json.dumps(
+                {"text": content or "", "disclaimers": "Not investment advice."},
+                ensure_ascii=False,
+            )
+
     except Exception as e:
         return json.dumps({
-            "error": "llm_explanation_failed", 
+            "error": "llm_explanation_failed",
             "message": f"Failed to generate LLM explanation: {str(e)}"
         })
 
-# ---------- Agent-Safe Parser Functions (Parse JSON, Return Structured Data) ----------
 
 def _parse_search_results(json_str: str) -> str:
     """Parse search results JSON into readable format"""
@@ -468,7 +436,6 @@ def _parse_price_series(json_str: str) -> str:
             if "error" in data[0] if data else {}:
                 return f"Error: {data[0].get('message', 'Unknown error')}"
             
-            # Summary statistics
             closes = [float(item.get("close", 0)) for item in data if item.get("close")]
             if closes:
                 result = f"Price Series Summary ({len(data)} days):\n"
@@ -548,7 +515,6 @@ def _parse_events(json_str: str) -> str:
     except:
         return json_str
 
-# ---------- CrewAI Tool Functions (with @tool decorators) ----------
 
 @tool("search_symbols")
 def search_symbols_tool(q: str) -> str:
@@ -565,7 +531,7 @@ def search_symbols_tool(q: str) -> str:
     """
     start_time = time.time()
     try:
-        json_result = search_symbols(q)  # Call the MCP tool
+        json_result = search_symbols(q)
         parsed_result = _parse_search_results(json_result)
         _log_tool_call("search_symbols", {"q": q}, start_time, True, parsed_result)
         return parsed_result
@@ -589,7 +555,7 @@ def get_quote_tool(symbol: str) -> str:
     """
     start_time = time.time()
     try:
-        json_result = latest_quote(symbol)  # Call the MCP tool
+        json_result = latest_quote(symbol)
         parsed_result = _parse_quote(json_result)
         _log_tool_call("get_quote", {"symbol": symbol}, start_time, True, parsed_result)
         return parsed_result
@@ -613,7 +579,7 @@ def get_price_series_tool(symbol: str) -> str:
     """
     start_time = time.time()
     try:
-        json_result = price_series(symbol)  # Call the MCP tool
+        json_result = price_series(symbol)
         parsed_result = _parse_price_series(json_result)
         _log_tool_call("get_price_series", {"symbol": symbol}, start_time, True, parsed_result)
         return parsed_result
@@ -640,7 +606,7 @@ def get_indicators_tool(symbol: str, window_sma: int = 20, window_ema: int = 50,
     """
     start_time = time.time()
     try:
-        json_result = indicators(symbol, window_sma, window_ema, window_rsi)  # Call the MCP tool
+        json_result = indicators(symbol, window_sma, window_ema, window_rsi)
         parsed_result = _parse_indicators(json_result)
         _log_tool_call("get_indicators", {
             "symbol": symbol,
@@ -674,7 +640,7 @@ def get_events_tool(symbol: str) -> str:
     """
     start_time = time.time()
     try:
-        json_result = detect_events(symbol)  # Call the MCP tool
+        json_result = detect_events(symbol)
         parsed_result = _parse_events(json_result)
         _log_tool_call("get_events", {"symbol": symbol}, start_time, True, parsed_result)
         return parsed_result
@@ -683,16 +649,16 @@ def get_events_tool(symbol: str) -> str:
         _log_tool_call("get_events", {"symbol": symbol}, start_time, False, error=error_msg)
         return f"Error: {error_msg}"
 
-def create_explanation_tool(openai_api_key: str = ""):
+def create_explanation_tool(gemini_api_key: str = ""):
     """
-    Factory function to create an explanation tool with a specific OpenAI API key.
-    
+    Factory function to create an explanation tool with a specific Gemini API key.
+
     This tool automatically fetches indicators and events data from the MCP server.
     Agents only need to provide the symbol - all calculations happen in MCP.
-    
+
     Args:
-        openai_api_key: OpenAI API key for LLM explanations
-    
+        gemini_api_key: Gemini API key for LLM explanations
+
     Returns:
         A tool function decorated with @tool
     """
@@ -724,9 +690,8 @@ def create_explanation_tool(openai_api_key: str = ""):
         """
         start_time = time.time()
         try:
-            json_result = explain(symbol, language, tone, risk_profile, horizon_days, bullets, openai_api_key)  # Call the MCP tool
+            json_result = explain(symbol, language, tone, risk_profile, horizon_days, bullets, gemini_api_key)
             
-            # Parse and format the result
             try:
                 data = json.loads(json_result)
                 if "error" in data:
@@ -737,7 +702,6 @@ def create_explanation_tool(openai_api_key: str = ""):
                     }, start_time, False, error=data.get("message", "Unknown error"))
                     return f"Error: {data.get('message', 'Unknown error')}"
                 
-                # Format the explanation nicely
                 if isinstance(data, dict):
                     text = data.get("text", "")
                     rationale = data.get("rationale", [])
@@ -768,7 +732,7 @@ def create_explanation_tool(openai_api_key: str = ""):
                     "language": language,
                     "tone": tone
                 }, start_time, True, json_result)
-                return json_result  # Return raw result if parsing fails
+                return json_result
         except Exception as e:
             error_msg = str(e)
             _log_tool_call("get_explanation", {
@@ -780,31 +744,29 @@ def create_explanation_tool(openai_api_key: str = ""):
     
     return get_explanation_tool
 
-# Tool registry for dynamic tool selection
 TOOL_REGISTRY = {
     "search_symbols": search_symbols_tool,
     "get_quote": get_quote_tool,
     "get_price_series": get_price_series_tool,
     "get_indicators": get_indicators_tool,
     "get_events": get_events_tool,
-    # Note: get_explanation requires factory function, handled separately
 }
 
-def get_tools_by_names(tool_names: list, openai_api_key: str = "") -> list:
+def get_tools_by_names(tool_names: list, gemini_api_key: str = "") -> list:
     """
     Get tools by their names from the registry.
-    
+
     Args:
         tool_names: List of tool names (e.g., ["search_symbols", "get_quote"])
-        openai_api_key: API key for explanation tool if needed
-    
+        gemini_api_key: Gemini API key for explanation tool if needed
+
     Returns:
         List of tool functions
     """
     tools = []
     for tool_name in tool_names:
         if tool_name == "get_explanation":
-            tools.append(create_explanation_tool(openai_api_key))
+            tools.append(create_explanation_tool(gemini_api_key))
         elif tool_name in TOOL_REGISTRY:
             tools.append(TOOL_REGISTRY[tool_name])
         else:

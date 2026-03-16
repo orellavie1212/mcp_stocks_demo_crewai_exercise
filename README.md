@@ -1,172 +1,217 @@
-# CrewAI + MCP Stocks Analysis - Complete Solution
+# Stock Agent Platform — Production Architecture
 
-## 🎯 Solution: Sector Comparison Agent Implementation
-
-**This repository contains the complete solution** with a fourth Sector Analyst agent that compares stocks against their sector peers.
-
-## 🚀 Quick Start
-
-1. Install dependencies: `pip install -r requirements.txt`
-2. Start MCP server: `uvicorn api:app --host 127.0.0.1 --port 8001`
-3. Run the app: `streamlit run streamlit_crewai_app.py`
-4. Enter your OpenAI API key and a stock symbol to see the complete analysis
-
-## 🏗️ Complete System Architecture
-
-The system now includes **four specialized agents**:
-
-### 🔍 **Research Agent**
-- **Role**: Stock Research Specialist
-- **Tools**: Search, Quote, Price Series
-- **Output**: Basic stock data and historical information
-
-### 📈 **Technical Agent** 
-- **Role**: Technical Analysis Expert
-- **Tools**: Indicators, Events, AI Explanation
-- **Output**: Technical analysis and market insights
-
-### 🏢 **Sector Analyst** ⭐ *NEW*
-- **Role**: Sector Comparison Specialist
-- **Tools**: Search, Quote, Indicators
-- **Output**: Sector peer comparison and positioning analysis
-
-### 📝 **Report Writer**
-- **Role**: Financial Report Writer
-- **Tools**: Synthesis only
-- **Output**: Comprehensive investment report with all analyses
-
-## 🔄 Workflow Process
-
-1. **Research Task** → Gathers fundamental company data
-2. **Technical Task** → Analyzes price trends and indicators
-3. **Sector Task** → Compares against 3-5 sector peers ⭐ *NEW*
-4. **Report Task** → Synthesizes all findings into final report
-
-## 🎯 Key Features of the Solution
-
-### **Sector Analysis Capabilities**
-- Identifies 3-5 key sector peers automatically
-- Compares performance across multiple timeframes (1M, 3M, 6M, 1Y)
-- Analyzes financial metrics (P/E ratio, market cap, revenue growth)
-- Evaluates technical indicators (RSI, moving averages, volatility)
-- Provides sector positioning and competitive advantage insights
-
-### **Enhanced Report Generation**
-- Executive summary with key findings
-- Current market position analysis
-- Technical analysis summary
-- **Sector comparison analysis** ⭐ *NEW*
-- Risk assessment with sector context
-- Professional investment recommendations
-
-## 📁 Project Structure
-
-```
-mcp_stocks_demo_crewai_exercise/
-├── README.md                    # This file (solution overview)
-├── streamlit_crewai_app.py      # Complete application with sector agent
-├── api.py                       # MCP server API
-├── mcp_server.py               # MCP server implementation
-├── datasource.py               # Data source functions
-├── requirements.txt            # Dependencies
-├── EXERCISE_INSTRUCTIONS.md    # Original exercise instructions
-└── hints/                      # Help files for learning
-    ├── agent_hint.md
-    ├── task_hint.md
-    └── integration_hint.md
-```
-
-## 🧪 Testing the Solution
-
-1. **Start the MCP server:**
-   ```bash
-   uvicorn api:app --host 127.0.0.1 --port 8001
-   ```
-
-2. **Run the Streamlit app:**
-   ```bash
-   streamlit run streamlit_crewai_app.py
-   ```
-
-3. **Test with popular stocks:**
-   - **AAPL** (Technology sector)
-   - **JPM** (Financial sector)
-   - **JNJ** (Healthcare sector)
-   - **XOM** (Energy sector)
-
-4. **Verify sector analysis appears** in the final report
-
-## 🎓 Learning Points Demonstrated
-
-### **Agent Design Patterns**
-- **Role Specialization**: Each agent has a clear, focused role
-- **Tool Assignment**: Appropriate tools for each agent's expertise
-- **Backstory Development**: Realistic professional backgrounds
-
-### **Task Orchestration**
-- **Sequential Processing**: Tasks execute in logical order
-- **Context Dependencies**: Later tasks build on earlier analysis
-- **Data Flow**: Information flows from research → technical → sector → report
-
-### **MCP Integration**
-- **Tool Reuse**: Same MCP tools used across different agents
-- **Error Handling**: Robust error handling for API calls
-- **Progress Tracking**: Real-time feedback during execution
-
-## 🔧 Technical Implementation Details
-
-### **Sector Agent Implementation**
-```python
-sector_agent = Agent(
-    role="Sector Comparison Specialist",
-    goal="Compare the target stock's performance, valuation, and fundamentals against its sector peers",
-    backstory="""You are a seasoned sector analyst with 15 years of experience...""",
-    tools=[search_tool, quote_tool, indicators_tool],
-    verbose=True,
-    allow_delegation=False
-)
-```
-
-### **Sector Task Implementation**
-```python
-sector_task = Task(
-    description="""Identify 3-5 key sector peers and compare across multiple dimensions...""",
-    expected_output="""A detailed sector comparison report including peer analysis...""",
-    tools=[SearchSymbolsTool(), GetQuoteTool(), GetIndicatorsTool()],
-    context=[research_task, technical_task]
-)
-```
-
-### **Workflow Integration**
-```python
-# Agent assignment
-tasks[0].agent = agents["research"]
-tasks[1].agent = agents["technical"] 
-tasks[2].agent = agents["sector"]      # NEW
-tasks[3].agent = agents["report"]
-```
-
-## 🎉 Success Metrics
-
-✅ **All Success Criteria Met:**
-- [x] Added Sector Analyst agent with appropriate role and backstory
-- [x] Created sector comparison task with clear description
-- [x] Integrated seamlessly with existing workflow
-- [x] Runs without errors
-- [x] Generates comprehensive sector analysis in output
-- [x] Updated UI to display all four agents
-- [x] Enhanced report includes sector comparison section
-
-## 🚀 Next Steps & Extensions
-
-This solution provides a solid foundation for further enhancements:
-
-- **Additional Sector Metrics**: Add more sophisticated sector analysis
-- **Industry-Specific Analysis**: Customize analysis by industry type
-- **Real-time Sector Updates**: Dynamic sector peer identification
-- **Portfolio Context**: Compare against portfolio holdings
-- **Risk-Adjusted Returns**: Include risk metrics in sector comparison
+> **A teaching project** showing how to evolve a CrewAI + MCP stock analysis demo into a production-ready platform on Google Cloud Platform.
 
 ---
 
-**Ready to explore?** Run the application and see the complete four-agent analysis in action! 🚀
+## 🎯 What This Project Teaches
+
+| Concept | Where to find it |
+|---|---|
+| Agent architecture (CrewAI) | `apps/agent-runtime/worker.py` |
+| MCP server as a service | `apps/mcp-server/server.py` |
+| Async job processing | `apps/job-api/main.py` → `docker/docker-compose.yml` |
+| 3-layer guardrails | `packages/shared-guardrails/guardrails.py` |
+| Structured logging + tracing | `packages/shared-observability/observability.py` |
+| LLM cost routing | `packages/shared-config/config.py` → `get_llm()` |
+| GCP infrastructure as code | `infra/terraform/main.tf` |
+| Kubernetes autoscaling | `infra/kubernetes/deployment.yaml` |
+| CI/CD pipeline | `.github/workflows/ci-cd.yml` |
+
+---
+
+## 🏗️ 4-Stage Evolution
+
+```
+Stage 1: Local Demo          Stage 2: Containers         Stage 3: Cloud-Ready         Stage 4: Production
+─────────────────────────    ────────────────────────    ─────────────────────────    ────────────────────
+One Python script            docker-compose.yml          Cloud Run (3 services)       GKE Autopilot workers
+Everything in-process        Network boundaries          Secret Manager               Pub/Sub async queue
+No observability             Redis + Pub/Sub emulator    Cloud Logging                HPA autoscaling
+OpenAI API key in .env       Langfuse (local)            Cloud Trace                  Workload Identity
+                                                         Firestore                    Langfuse (cloud)
+```
+
+---
+
+## 🚀 Quick Start (Local — Stage 2)
+
+### Prerequisites
+- Docker Desktop
+- A free [Google AI Studio](https://aistudio.google.com/apikey) API key
+
+```bash
+# 1. Clone
+git clone https://github.com/zviba/mcp_stocks_demo_crewai_exercise
+cd mcp_stocks_demo_crewai_exercise
+
+# 2. Configure
+cp .env.example .env
+# Edit .env: set GEMINI_API_KEY=your-key-here
+
+# 3. Start everything
+make up
+
+# 4. Open the UI
+open http://localhost:8501
+```
+
+**What starts:**
+| Service | URL | Description |
+|---|---|---|
+| Streamlit UI | http://localhost:8501 | User-facing app |
+| Job API | http://localhost:8000/docs | Async job gateway |
+| MCP Server | http://localhost:8001/docs | Tool/data server |
+| Langfuse | http://localhost:3000 | LLM call traces |
+| Redis | localhost:6379 | Cache + rate limiting |
+| Pub/Sub emulator | localhost:8085 | Async message queue |
+
+**Langfuse login:** `admin@localhost` / `admin123`
+
+---
+
+## ☁️ Deploy to GCP (Stage 3/4)
+
+### Prerequisites
+- GCP project with billing enabled
+- `gcloud`, `terraform`, `docker` installed
+- Authenticated: `gcloud auth login`
+
+```bash
+# One-command setup (provisions infra + deploys services)
+./scripts/setup-gcp.sh --project=your-gcp-project-id
+
+# Or step by step:
+make infra-up GCP_PROJECT=your-project    # Terraform: GKE, Redis, Pub/Sub, Firestore
+make build                                # Build Docker images
+make push GCP_PROJECT=your-project        # Push to Artifact Registry
+make deploy-run GCP_PROJECT=your-project  # Deploy to Cloud Run
+```
+
+**Cost when idle:** ~$0/day (Cloud Run scales to 0, Firestore/Pub/Sub are pay-per-use)
+
+**Stop billing when not teaching:**
+```bash
+make infra-down  # Destroys GKE + Redis + Cloud SQL (keeps Firestore/Pub/Sub)
+```
+
+---
+
+## 📂 Repository Structure
+
+```
+├── apps/
+│   ├── frontend-streamlit/    # Streamlit UI (polls Job API)
+│   ├── job-api/               # FastAPI: accept → persist → publish → return
+│   ├── agent-runtime/         # CrewAI workers consuming Pub/Sub
+│   └── mcp-server/            # Tool/data service (yfinance + Gemini)
+│
+├── packages/
+│   ├── shared-models/         # Pydantic models (contract between services)
+│   ├── shared-config/         # Settings + LLM factory (model routing)
+│   ├── shared-observability/  # Structured logging + Langfuse + Cloud Trace
+│   └── shared-guardrails/     # 3-layer safety system
+│
+├── infra/
+│   ├── terraform/             # GCP infrastructure (GKE, Redis, Pub/Sub...)
+│   └── kubernetes/            # K8s manifests (Deployment + HPA)
+│
+├── docker/
+│   └── docker-compose.yml     # Full local stack
+│
+├── tests/
+│   └── unit/                  # pytest unit tests (guardrails, models)
+│
+├── scripts/
+│   └── setup-gcp.sh           # One-command GCP deployment
+│
+├── .github/workflows/
+│   └── ci-cd.yml              # GitHub Actions CI/CD
+│
+├── docs/architecture/         # Architecture diagrams and explanations
+├── .env.example               # Environment variable template
+└── Makefile                   # All commands in one place
+```
+
+---
+
+## 🔑 Key Design Decisions
+
+### 1. Gemini Model Routing (Cost Control)
+```
+FAST  → gemini-2.5-flash-lite   → Guardrail checks, intent classification (~free)
+MAIN  → gemini-2.5-flash        → All 4 agent tasks (research, technical, sector)
+STRONG→ gemini-2.5-pro          → Final report synthesis (used sparingly)
+```
+
+### 2. Async Job Pattern
+```
+POST /jobs → 202 Accepted → {job_id}    (returns in <100ms)
+GET  /jobs/{job_id} → poll until COMPLETED
+```
+vs. demo: `streamlit blocks for 2+ minutes`
+
+### 3. Three-Layer Guardrails
+- **Input**: length, injection patterns, intent check
+- **Tool**: allowlist, argument validation, call count limit
+- **Output**: secret redaction, prediction flagging, financial disclaimer
+
+### 4. Workload Identity (No credentials in containers)
+```
+GKE pod → [Workload Identity] → GCP Service Account → Vertex AI / Firestore / Pub/Sub
+No GEMINI_API_KEY in the container. No credentials to rotate or leak.
+```
+
+---
+
+## 🛠️ Development Commands
+
+```bash
+make help          # Show all commands
+make up            # Start local stack
+make down          # Stop local stack
+make logs          # Tail all service logs
+make test          # Run unit tests
+make lint          # Lint with ruff
+make format        # Format with ruff
+
+make infra-plan    # Preview Terraform changes
+make infra-up      # Provision GCP infrastructure
+make deploy-run    # Deploy to Cloud Run
+make deploy-gke    # Deploy workers to GKE
+make scale-workers REPLICAS=5  # Scale agent pods
+```
+
+---
+
+## 📊 Observability
+
+### Local
+- **Langfuse**: http://localhost:3000 — see every Gemini call, prompt, token count
+- **Docker logs**: `make logs` — structured JSON logs with trace_id correlation
+
+### Production (GCP)
+- **Cloud Logging**: Filter by `jsonPayload.trace_id="<id>"` to trace one request
+- **Cloud Trace**: Timeline view across all services
+- **Cloud Monitoring**: Dashboards for queue depth, error rate, latency, token usage
+
+---
+
+## 🔒 Security Notes
+
+- Secrets live in **Secret Manager**, never in code or Docker images
+- Each service has a **least-privilege service account** (4 separate SAs)
+- **Internal API token** protects service-to-service calls
+- **Workload Identity** eliminates long-lived credential files in containers
+- All logs are **sanitized** — no API keys or tokens in output
+
+---
+
+## 📚 Related Resources
+
+- [CrewAI Documentation](https://docs.crewai.com)
+- [Google Gemini on Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/gemini)
+- [Cloud Pub/Sub vs Kafka](docs/architecture/messaging-comparison.md)
+- [Langfuse Self-Hosted](https://langfuse.com/docs/deployment/self-host)
+- [GKE Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview)
+- [Original Demo Repo](https://github.com/zviba/mcp_stocks_demo_crewai_exercise)

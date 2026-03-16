@@ -1,0 +1,5 @@
+# Frontend — minimal deps, no LLM or agent libraries
+streamlit>=1.36
+requests>=2.31
+pydantic>=2.6
+python-dotenv>=1.0

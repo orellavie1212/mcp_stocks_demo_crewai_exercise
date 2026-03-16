@@ -15,7 +15,6 @@ import subprocess
 import requests
 from datetime import datetime
 
-# Import agent functions from separate module
 try:
     from agents import run_crewai_analysis, CREWAI_AVAILABLE
 except ImportError:
@@ -25,10 +24,8 @@ except ImportError:
     def run_crewai_analysis(*args, **kwargs):
         return {"error": "Agents module not available"}
 
-# MCP API Configuration
 MCP_API_URL = "http://127.0.0.1:8001"
 
-# Page configuration
 st.set_page_config(
     page_title="CrewAI + MCP Stocks Analysis",
     page_icon="🤖",
@@ -36,7 +33,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
 st.markdown("""
 <style>
     .main-header {
@@ -100,7 +96,6 @@ def start_mcp_api():
                 "--log-level", "warning"
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            # Wait for server to start
             for _ in range(20):
                 time.sleep(0.5)
                 if check_mcp_api():
@@ -113,18 +108,14 @@ def start_mcp_api():
 def main():
     """Main Streamlit app"""
     
-    # Header
     st.markdown('<h1 class="main-header">🤖 CrewAI + MCP Stocks Analysis</h1>', unsafe_allow_html=True)
     st.markdown("**Comprehensive stock analysis using specialized AI agents**")
     
-    # Simple instructions
-    st.info("💡 **Quick Start:** 1) Start MCP Server (sidebar) → 2) Enter OpenAI API Key → 3) Enter stock symbol → 4) Click Start Analysis")
+    st.info("💡 **Quick Start:** 1) Start MCP Server (sidebar) → 2) Enter Gemini API Key → 3) Enter stock symbol → 4) Click Start Analysis")
     
-    # Sidebar configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
         
-        # MCP API Server Status
         st.subheader("🔗 MCP API Server Status")
         if check_mcp_api():
             st.success("✅ MCP API Server Connected")
@@ -140,30 +131,27 @@ def main():
         
         st.markdown("---")
         
-        # OpenAI API Key
-        st.subheader("🔑 OpenAI API Key")
-        openai_api_key = st.text_input(
-            "Enter your OpenAI API Key",
-            value=st.session_state.get("openai_api_key", ""),
+        st.subheader("🔑 Gemini API Key")
+        gemini_api_key = st.text_input(
+            "Enter your Gemini API Key",
+            value=st.session_state.get("gemini_api_key", ""),
             type="password",
-            help="Required for LLM explanations in technical analysis"
+            help="Get a free key at https://aistudio.google.com/apikey"
         )
-        if openai_api_key:
-            st.session_state["openai_api_key"] = openai_api_key
+        if gemini_api_key:
+            st.session_state["gemini_api_key"] = gemini_api_key
             st.success("✅ API Key Set")
         else:
             st.warning("⚠️ API Key Required")
         
     
-    # Main content
     if not CREWAI_AVAILABLE:
         st.error("CrewAI is not installed. Please install it using the command in the sidebar.")
         return
     
-    if not openai_api_key:
-        st.warning("Please enter your OpenAI API key in the sidebar to enable LLM explanations.")
+    if not gemini_api_key:
+        st.warning("Please enter your Gemini API key in the sidebar to enable LLM explanations.")
     
-    # Stock selection
     st.header("📊 Stock Selection")
     
     col1, col2 = st.columns([2, 1])
@@ -182,7 +170,6 @@ def main():
     with col2:
         st.metric("Selected Symbol", symbol if symbol else "None")
     
-    # Agent information
     st.header("👥 Analysis Agents")
     
     col1, col2, col3, col4 = st.columns(4)
@@ -227,7 +214,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
     
-    # Analysis controls
     st.header("🚀 Run Analysis")
     
     if not symbol:
@@ -237,9 +223,9 @@ def main():
     if not check_mcp_api():
         st.error("MCP API server is not running. Please start it using the button in the sidebar.")
         return
-    
+
     col1, col2, col3 = st.columns([1, 1, 2])
-    
+
     with col1:
         run_analysis = st.button("🔍 Start Analysis", type="primary", use_container_width=True)
     
@@ -247,7 +233,6 @@ def main():
         clear_results = st.button("🗑️ Clear Results", use_container_width=True)
     
     with col3:
-        # Show analysis status
         if st.session_state.get("analysis_running", False):
             st.markdown('<p class="status-warning">⏳ Analysis in progress...</p>', unsafe_allow_html=True)
         elif "analysis_result" in st.session_state:
@@ -257,19 +242,15 @@ def main():
                 st.markdown('<p class="status-error">❌ Analysis failed</p>', unsafe_allow_html=True)
     
     
-    # Clear results
     if clear_results:
         for key in ["analysis_result", "analysis_running", "analysis_progress", "debug_messages", "verbose_messages"]:
             if key in st.session_state:
                 del st.session_state[key]
         st.rerun()
     
-    # Run analysis
-    if run_analysis and symbol and openai_api_key and not st.session_state.get("analysis_running", False):
-        # Set flag to prevent multiple executions
+    if run_analysis and symbol and gemini_api_key and not st.session_state.get("analysis_running", False):
         st.session_state["analysis_running"] = True
         
-        # Create progress container
         progress_container = st.container()
         
         with progress_container:
@@ -278,59 +259,46 @@ def main():
             status_text = st.empty()
             progress_percentage = st.empty()
         
-        # Create Analysis Results section (empty initially)
         st.header("📋 Analysis Results")
         results_placeholder = st.empty()
         
-        # Progress callback with percentage tracking
         def update_progress(message, percentage=None):
             status_text.text(message)
             if percentage is not None:
                 progress_bar.progress(percentage)
                 progress_percentage.text(f"Progress: {percentage:.0f}%")
         
-        # Simplified verbose callback - just store messages, no real-time display
         def verbose_callback(message):
             if "verbose_messages" not in st.session_state:
                 st.session_state["verbose_messages"] = []
             st.session_state["verbose_messages"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
-            # Keep only last 50 messages
             if len(st.session_state["verbose_messages"]) > 50:
                 st.session_state["verbose_messages"] = st.session_state["verbose_messages"][-50:]
             
         
-        # Run analysis directly with progress updates
         try:
-            result = run_crewai_analysis(symbol, openai_api_key, update_progress, verbose_callback)
+            result = run_crewai_analysis(symbol, gemini_api_key, update_progress, verbose_callback)
             
-            # Store in session state
             st.session_state["analysis_result"] = result
-            st.session_state["analysis_running"] = False  # Clear running flag
+            st.session_state["analysis_running"] = False
             
-            # Display results immediately
             with results_placeholder.container():
                 if result.get("success", False):
                     st.success(f"✅ Analysis completed for {result.get('symbol', 'Unknown')}")
                     
-                    # Display the result
                     st.subheader("📊 Comprehensive Analysis Report")
                     
-                    # Format the result nicely
                     analysis_text = result.get("result", "")
                     
-                    # Try to parse and display structured content
                     if analysis_text:
-                        # If it's a string, display it directly
                         if isinstance(analysis_text, str):
                             st.markdown("### Full Analysis Report")
                             st.markdown(analysis_text)
                         else:
-                            # If it's an object, try to display it nicely
                             st.json(analysis_text)
                     else:
                         st.warning("No analysis text found in result")
                     
-                    # Tool Trace Section
                     if result.get("tool_trace"):
                         st.subheader("🔍 Tool Call Trace (MCP Verification)")
                         tool_trace = result.get("tool_trace", [])
@@ -349,11 +317,9 @@ def main():
                                     st.text(f"   - **Result Preview:** {call.get('result_preview')[:150]}...")
                                 st.markdown("---")
                     
-                    # Download button
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = f"crewai_analysis_{result.get('symbol', 'stock')}_{timestamp}.txt"
                     
-                    # Include tool trace in download
                     download_content = f"{analysis_text}\n\n{'='*60}\nTOOL CALL TRACE (MCP Verification)\n{'='*60}\n"
                     if result.get("tool_trace"):
                         for call in result.get("tool_trace", []):
@@ -380,27 +346,23 @@ def main():
                 "timestamp": datetime.now().isoformat(),
                 "symbol": symbol
             }
-            st.session_state["analysis_running"] = False  # Clear running flag
+            st.session_state["analysis_running"] = False
             
-            # Display error in results section
             with results_placeholder.container():
                 st.error(f"❌ Analysis failed: {str(e)}")
         
-        # Clear only the progress container after completion, keep verbose log
         with progress_container:
-            st.empty()  # Clear progress elements
+            st.empty()
     
-    # Show verbose messages only after analysis is complete
     if "analysis_result" in st.session_state and "verbose_messages" in st.session_state and st.session_state["verbose_messages"]:
         with st.expander("🤖 Agent Activity Log", expanded=False):
-            for msg in st.session_state["verbose_messages"][-15:]:  # Show last 15 messages
+            for msg in st.session_state["verbose_messages"][-15:]:
                 st.text(msg)
     
-    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <p>🤖 CrewAI + MCP Stocks Analysis Demo | Powered by OpenAI & Yahoo Finance</p>
+        <p>🤖 CrewAI + MCP Stocks Analysis Demo | Powered by Google Gemini & Yahoo Finance</p>
     </div>
     """, unsafe_allow_html=True)
 

@@ -1,0 +1,17 @@
+# Job API — thin gateway service
+# Much smaller than agent-runtime: no CrewAI, no LangChain
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pydantic-settings>=2.2
+python-dotenv>=1.0
+
+# GCP clients
+google-cloud-firestore>=2.16
+google-cloud-pubsub>=2.21
+
+# Redis (rate limiting + idempotency)
+redis[asyncio]>=5.0
+
+# Observability
+opentelemetry-sdk>=1.24
