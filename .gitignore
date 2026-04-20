@@ -1,6 +1,8 @@
 # Environment variables
+
+!.env.example
 .env
-.env.*
+
 
 # Python
 __pycache__/
@@ -36,5 +38,3 @@ desktop.ini
 # IDE settings
 .vscode/
 .idea/
-.env
-.env.*
