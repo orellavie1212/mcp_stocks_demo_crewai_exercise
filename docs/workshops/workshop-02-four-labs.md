@@ -23,6 +23,9 @@ What changes is **how** the components are wired together.
 
 ## Pre-Work (all labs)
 
+> **Windows users:** everything below assumes a POSIX shell. Set up WSL2 first and run
+> all commands from inside Ubuntu — see [../../WINDOWSREADME.md](../../WINDOWSREADME.md).
+
 ```bash
 git clone https://github.com/zviba/mcp_stocks_demo_crewai_exercise.git
 cd mcp_stocks_demo_crewai_exercise

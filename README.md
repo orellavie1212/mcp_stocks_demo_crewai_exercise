@@ -2,6 +2,8 @@
 
 > **A teaching project** showing how to evolve a CrewAI + MCP stock analysis demo into a production-ready platform on Google Cloud Platform.
 
+> **Windows users:** run everything via WSL2 + Ubuntu. See [WINDOWSREADME.md](WINDOWSREADME.md) for the full setup and per-lab commands.
+
 ---
 
 ## 🎯 What This Project Teaches
