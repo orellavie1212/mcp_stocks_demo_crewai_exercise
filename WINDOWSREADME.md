@@ -1,0 +1,246 @@
+# Windows Setup — Running the 4 Labs via WSL2
+
+This repo's Makefile, shell scripts, and some CLI tools (`chmod`, `envsubst`, `gcloud`,
+`terraform`) assume a POSIX shell. The cleanest way to run Labs 1–4 on Windows is
+through **WSL2 + Ubuntu 24.04**. Inside WSL the commands are byte-for-byte the same
+as on macOS/Linux.
+
+> Assumption: your `.env` is already filled (in particular `GEMINI_API_KEY`).
+
+---
+
+## 0) Prerequisites on Windows (once)
+
+```powershell
+# In PowerShell as Administrator
+wsl --install -d Ubuntu-24.04
+# Reboot if prompted, then launch "Ubuntu" from Start menu and create your linux user.
+```
+
+Install **Docker Desktop** → Settings → Resources → **WSL Integration** → enable your
+`Ubuntu-24.04` distro. Restart Docker Desktop.
+
+> Windows-installed tools (choco-installed `terraform.exe`, `make.exe`, Anaconda, etc.)
+> are Windows binaries and are **not** the tools invoked inside WSL. Install the
+> linux-native versions inside Ubuntu as shown below.
+
+---
+
+## 1) One-time setup inside WSL (Ubuntu shell)
+
+```bash
+# Core tooling (Labs 1–3)
+sudo apt update
+sudo apt install -y make python3-venv python3-pip dos2unix git curl gnupg
+
+# Lab 4 extras (skip if you only plan to do Labs 1–3)
+sudo apt install -y gettext-base software-properties-common wget
+
+# Terraform (HashiCorp apt repo)
+wget -O- https://apt.releases.hashicorp.com/gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
+echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+  | sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+# gcloud CLI + kubectl (Google apt repo)
+curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+  | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list
+
+sudo apt update
+sudo apt install -y terraform google-cloud-cli \
+                    google-cloud-cli-gke-gcloud-auth-plugin kubectl
+```
+
+---
+
+## 2) Clone the repo **inside the WSL filesystem** (not `/mnt/c`)
+
+```bash
+cd ~
+git clone https://github.com/zviba/mcp_stocks_demo_crewai_exercise.git
+cd ~/mcp_stocks_demo_crewai_exercise
+```
+
+> Cloning under `/mnt/c/...` works but is 5–20× slower and causes Docker bind-mount
+> permission issues. Keep the repo under your linux `$HOME`.
+
+Bring your already-filled `.env` over and normalise line endings (Windows editors
+often save as CRLF, which silently breaks bash env reads and causes 401s from Gemini):
+
+```bash
+# Option A — copy from your Windows drive, strip CRLF
+cp /mnt/c/Users/<you>/mcp_stocks_demo_crewai_exercise/.env ./.env
+dos2unix ./.env
+
+# Option B — recreate fresh inside WSL
+cp .env.example .env && nano .env     # paste GEMINI_API_KEY, save
+```
+
+---
+
+## 3) Python env + deps (Labs 1–2 run from host Python)
+
+The **linux** conda/venv inside the WSL distro is what matters here. A Windows-installed
+Anaconda/Miniconda cannot be used from WSL — install conda *inside* Ubuntu if you want
+to use it.
+
+### Option A — conda (recommended if you already use conda)
+
+One-time install of linux Miniforge inside WSL:
+
+```bash
+curl -L -o /tmp/miniforge.sh \
+  https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+bash /tmp/miniforge.sh -b -p "$HOME/miniforge3"
+"$HOME/miniforge3/bin/conda" init bash
+exec bash
+```
+
+Create the project env and install deps:
+
+```bash
+conda create -n stock-agent python=3.11 -y
+conda activate stock-agent
+pip install -r requirements.txt \
+            -r apps/mcp-server/requirements.txt \
+            -r apps/job-api/requirements.txt \
+            -r apps/agent-runtime/requirements.txt \
+            -r apps/frontend-streamlit/requirements.txt
+```
+
+Each new WSL tab: `cd ~/mcp_stocks_demo_crewai_exercise && conda activate stock-agent`.
+
+### Option B — venv (stdlib, no extra install)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt \
+            -r apps/mcp-server/requirements.txt \
+            -r apps/job-api/requirements.txt \
+            -r apps/agent-runtime/requirements.txt \
+            -r apps/frontend-streamlit/requirements.txt
+```
+
+Each new WSL tab: `cd ~/mcp_stocks_demo_crewai_exercise && source .venv/bin/activate`.
+
+---
+
+## 4) Lab 1 — Sync local (two tabs)
+
+```bash
+# Tab 1 — health-check API on :8001
+uvicorn api:app --host 127.0.0.1 --port 8001
+
+# Tab 2 — Streamlit UI on :8501
+streamlit run streamlit_crewai_app.py
+```
+
+Open http://localhost:8501 in your Windows browser. WSL2 forwards localhost to Windows
+automatically.
+
+---
+
+## 5) Lab 2 — Async HTTP (four tabs)
+
+Every tab: `cd ~/mcp_stocks_demo_crewai_exercise` and activate your env (`conda activate stock-agent` or `source .venv/bin/activate`).
+
+```bash
+# Tab 1 — MCP server on :8001
+make lab2-mcp
+
+# Tab 2 — Job API on :8000
+make lab2-api
+
+# Tab 3 — Agent runtime (HTTP mode) on :8002
+make lab2-worker
+
+# Tab 4 — Streamlit UI on :8501
+make lab2-ui
+```
+
+Open http://localhost:8501. The Makefile already does `-include .env` + `export`, so
+`GEMINI_API_KEY` from `.env` flows into every target.
+
+---
+
+## 6) Lab 3 — Docker Compose
+
+Make sure Docker Desktop is running and WSL integration is enabled for your distro.
+
+```bash
+make lab3-up         # docker compose --env-file .env -f docker/docker-compose.yml up --build -d
+make logs            # tail logs from all services
+make lab3-down       # stop
+```
+
+Service URLs:
+
+| Service       | URL                             |
+|---------------|---------------------------------|
+| Streamlit UI  | http://localhost:8501           |
+| Job API docs  | http://localhost:8000/docs      |
+| MCP docs      | http://localhost:8001/docs      |
+| Langfuse UI   | http://localhost:3000           |
+
+---
+
+## 7) Lab 4 — GCP
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+
+export GCP_PROJECT=your-gcp-project-id
+export GCP_REGION=us-central1
+
+make setup-gcp  GCP_PROJECT=$GCP_PROJECT GCP_REGION=$GCP_REGION
+make show-urls  GCP_PROJECT=$GCP_PROJECT GCP_REGION=$GCP_REGION
+
+# Teardown when done (stops billing)
+make infra-down GCP_PROJECT=$GCP_PROJECT GCP_REGION=$GCP_REGION
+```
+
+`setup-gcp` reads `GEMINI_API_KEY` from your `.env` and seeds it into GCP Secret
+Manager; you don't need to paste it anywhere else.
+
+---
+
+## 8) Troubleshooting
+
+- **401 from Gemini (all labs)** → `.env` saved with CRLF line endings. Fix:
+  ```bash
+  dos2unix .env
+  ```
+- **`docker` not found inside WSL** → Docker Desktop → Settings → Resources → WSL
+  Integration → toggle your distro on → restart Docker Desktop.
+- **`make`, `conda`, or `terraform` not found** → you are running the Windows binary
+  (e.g. `make.exe` from choco) instead of the linux one. Open a fresh Ubuntu shell and
+  verify with `which make` (should be `/usr/bin/make`).
+- **Port already in use (8501/8000/8001)** → close the conflicting Windows app (often a
+  Windows-side Python/Streamlit already running).
+- **Very slow installs or Docker bind-mount permission errors** → the repo is under
+  `/mnt/c/...`. Move it to `~/` inside WSL and re-run.
+- **`gcloud auth login` hangs / can't open a browser** → install `wslu` which provides
+  `wslview`, or pass `--no-browser`:
+  ```bash
+  sudo apt install -y wslu
+  # or
+  gcloud auth login --no-browser
+  ```
+- **Conda env inactive after opening a new tab** → ensure `conda init bash` ran once
+  and restart the shell (`exec bash`).
+- **Is my `conda` the Windows one or the WSL one?** A Windows-installed Anaconda /
+  Miniconda and its envs cannot be used from inside WSL (different OS binaries).
+  Check from an Ubuntu shell:
+  ```bash
+  which conda
+  conda info | grep -E 'platform|base environment'
+  ```
+  - Good (reusable inside WSL): path like `/home/<you>/miniforge3/bin/conda` and
+    `platform : linux-64`.
+  - Not reusable: path under `/mnt/c/...` (e.g. `/mnt/c/Users/<you>/anaconda3/Scripts/conda`)
+    or `platform : win-64` — that's your Windows conda. Install linux Miniforge inside
+    WSL using the snippet in section 3 above and recreate the env there; both condas
+    can coexist without conflict.
