@@ -188,22 +188,39 @@ Service URLs:
 
 ## 7) Lab 4 — GCP
 
+Make sure `.env` already has the right values (they were copied from `.env.example` and
+the Makefile auto-loads them via `-include .env` + `export`):
+
 ```bash
-gcloud auth login
-gcloud auth application-default login
+grep -E '^(GCP_PROJECT|GCP_REGION|GEMINI_API_KEY)=' .env
+```
 
-export GCP_PROJECT=your-gcp-project-id
-export GCP_REGION=us-central1
+Authenticate once. On WSL, use `--no-launch-browser` for the ADC flow — it avoids the
+flaky WSL-to-Windows browser redirect and just prints a URL you paste into any browser:
 
-make setup-gcp  GCP_PROJECT=$GCP_PROJECT GCP_REGION=$GCP_REGION
-make show-urls  GCP_PROJECT=$GCP_PROJECT GCP_REGION=$GCP_REGION
+```bash
+gcloud auth login                                     # interactive, opens browser
+gcloud auth application-default login --no-launch-browser   # paste URL, paste code back
+```
+
+Then run the labs directly (no need to `export` or pass `GCP_PROJECT=` on the CLI — the
+Makefile reads them from `.env`):
+
+```bash
+make setup-gcp        # provisions GCP infra + deploys all services
+make show-urls        # prints Cloud Run URLs
 
 # Teardown when done (stops billing)
-make infra-down GCP_PROJECT=$GCP_PROJECT GCP_REGION=$GCP_REGION
+make teardown         # interactive: asks for confirmation
+# or for unattended / CI runs:
+# make teardown-yes
 ```
 
 `setup-gcp` reads `GEMINI_API_KEY` from your `.env` and seeds it into GCP Secret
 Manager; you don't need to paste it anywhere else.
+
+> If for some reason you want to override the project/region for one run without
+> editing `.env`, you can still do: `make setup-gcp GCP_PROJECT=other-proj GCP_REGION=europe-west1`.
 
 ---
 
@@ -228,6 +245,13 @@ Manager; you don't need to paste it anywhere else.
   sudo apt install -y wslu
   # or
   gcloud auth login --no-browser
+  ```
+- **`gcloud auth application-default login` fails in WSL** (often even when
+  `gcloud auth login` works) → the ADC flow tries to spin up a local HTTP server that
+  the Windows browser can't reach. Use the no-browser variant — it prints a URL you
+  open in any browser and then paste the auth code back:
+  ```bash
+  gcloud auth application-default login --no-launch-browser
   ```
 - **Conda env inactive after opening a new tab** → ensure `conda init bash` ran once
   and restart the shell (`exec bash`).
