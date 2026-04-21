@@ -322,3 +322,18 @@ Manager; you don't need to paste it anywhere else.
   ```
   If you pulled the latest `scripts/setup-gcp.sh`, this is already handled
   automatically as Step 1.5. Subsequent runs on the same project are no-ops.
+- **Lab 4 `make setup-gcp` fails at `terraform apply` with
+  `Cannot import non-existent remote object` on `google_firestore_database.default`**
+  → On a brand-new project the Firestore default DB doesn't exist yet, but
+  Terraform's `import` block in `main.tf` is strict. Pre-create the DB
+  manually once, then re-run:
+  ```bash
+  gcloud firestore databases create \
+    --location=<your-region> \
+    --database='(default)' \
+    --type=firestore-native \
+    --project=<your-project-id>
+  make setup-gcp
+  ```
+  If you pulled the latest `scripts/setup-gcp.sh`, this is handled
+  automatically as Step 1.6 (idempotent).
