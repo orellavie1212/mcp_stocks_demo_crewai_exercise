@@ -108,6 +108,47 @@ done
 echo "  ✅ Done — continuing (deletions complete in background)"
 
 # ---------------------------------------------------------------------------
+# Step 1b: Wait for Cloud Run deletions + clean up Direct VPC Egress leftovers
+#
+# Cloud Run with --network/--subnet (Direct VPC Egress) auto-creates a hidden
+# compute address "serverless-ipv4-<id>" inside the subnet. GCP cleans it up
+# when the service is fully gone, but --async above means we don't wait for
+# that. If we proceed straight to 'terraform destroy', the subnet destroy
+# fails with 'resourceInUseByAnotherResource' pointing at serverless-ipv4-*.
+# So: poll for service removal, then nuke any lingering serverless addresses.
+# ---------------------------------------------------------------------------
+echo ""
+echo "⏳ Step 1b: Waiting for Cloud Run deletions + VPC egress cleanup..."
+
+for i in $(seq 1 18); do
+  REMAINING=$(gcloud run services list \
+    --region="$REGION" --project="$PROJECT_ID" \
+    --filter="metadata.name=(mcp-server OR job-api OR agent-runtime OR frontend-streamlit OR langfuse)" \
+    --format="value(metadata.name)" 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$REMAINING" == "0" ]]; then
+    echo "  ✅ All Cloud Run services deleted"
+    break
+  fi
+  echo "  ... still $REMAINING service(s) being deleted ($(( i * 10 ))s)"
+  sleep 10
+done
+
+echo "  Cleaning orphaned Direct-VPC-Egress addresses in $REGION..."
+ORPHANS=$(gcloud compute addresses list --project="$PROJECT_ID" \
+  --filter="name ~ ^serverless-ipv4 AND region:$REGION" \
+  --format="value(name)" 2>/dev/null || true)
+if [[ -n "$ORPHANS" ]]; then
+  while IFS= read -r addr; do
+    gcloud compute addresses delete "$addr" \
+      --region="$REGION" --project="$PROJECT_ID" --quiet 2>/dev/null \
+      && echo "    ✅ deleted: $addr" \
+      || echo "    ⏭️  could not delete (may already be gone): $addr"
+  done <<< "$ORPHANS"
+else
+  echo "  ⏭️  No serverless-ipv4 addresses found"
+fi
+
+# ---------------------------------------------------------------------------
 # Step 2: Delete GKE workloads (namespace)
 # Terraform destroy will delete the cluster itself
 # No describe check — just try get-credentials and ignore failure
