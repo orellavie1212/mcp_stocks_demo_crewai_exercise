@@ -103,6 +103,25 @@ gcloud config set compute/region "$REGION"
 echo "  ✅ Project: $PROJECT_ID"
 
 # ---------------------------------------------------------------------------
+# Step 1.5: Enable bootstrap APIs BEFORE Terraform runs
+# ---------------------------------------------------------------------------
+# Teaching note: Terraform's `import` block in main.tf (Firestore default DB)
+# and the `data "google_project"` lookup both run during plan/refresh — BEFORE
+# google_project_service.apis has a chance to enable APIs. On a brand-new
+# project this fails with 403 SERVICE_DISABLED on firestore.googleapis.com.
+# Enabling the minimum bootstrap set here makes `terraform apply` work on
+# fresh projects. `gcloud services enable` is idempotent — no-op on re-runs.
+echo ""
+echo "🔌 Step 1.5: Enabling bootstrap GCP APIs..."
+gcloud services enable \
+  serviceusage.googleapis.com \
+  cloudresourcemanager.googleapis.com \
+  firestore.googleapis.com \
+  compute.googleapis.com \
+  --project="${PROJECT_ID}"
+echo "  ✅ Bootstrap APIs enabled"
+
+# ---------------------------------------------------------------------------
 # Step 2: Terraform — provision ALL infrastructure
 # ---------------------------------------------------------------------------
 echo ""

@@ -307,3 +307,18 @@ Manager; you don't need to paste it anywhere else.
   You should see `crewai==1.10.1`, `langchain==1.2.12`, `langchain-core==1.2.18`,
   `langchain-google-genai==4.2.1`. If not, `git pull` (or commit your local pins),
   then run `make lab3-rebuild`.
+- **Lab 4 `make setup-gcp` fails at `terraform apply` with
+  `Cloud Firestore API has not been used in project ... SERVICE_DISABLED`** →
+  Terraform's `import` block for the Firestore default DB runs during plan/refresh,
+  before any APIs are enabled. Bootstrap them manually once, then re-run:
+  ```bash
+  gcloud services enable firestore.googleapis.com \
+                         serviceusage.googleapis.com \
+                         cloudresourcemanager.googleapis.com \
+                         compute.googleapis.com \
+    --project=<your-project-id>
+  # wait ~30s for propagation, then:
+  make setup-gcp
+  ```
+  If you pulled the latest `scripts/setup-gcp.sh`, this is already handled
+  automatically as Step 1.5. Subsequent runs on the same project are no-ops.
