@@ -11,7 +11,10 @@ fastmcp>=0.2.5
 matplotlib
 
 # CrewAI + Gemini (Lab 1 — original demo on Gemini)
-crewai>=0.28.0
-langchain>=0.1.0
-langchain-google-genai>=1.0.0
+# Pinned to versions verified working on macOS. CrewAI >=1.12 tightened Agent.llm
+# validation and rejects raw langchain chat-model objects, breaking Labs 2/3 on
+# fresh installs. Update with care.
+crewai==1.10.1
+langchain==1.2.12
+langchain-google-genai==4.2.1
 
