@@ -445,13 +445,20 @@ export LANGFUSE_PUBLIC_KEY="${LF_PUBLIC_KEY}"
 
 envsubst < "${REPO_ROOT}/infra/kubernetes/deployment.yaml" | kubectl apply -f -
 
-echo "  Waiting for rollout (up to 5 min on GKE Autopilot first boot)..."
-kubectl rollout status deployment/agent-runtime \
-  --namespace=stock-agent --timeout=300s
+echo "  Waiting for rollout (up to 10 min on GKE Autopilot first boot)..."
+if ! kubectl rollout status deployment/agent-runtime \
+    --namespace=stock-agent --timeout=600s; then
+  echo ""
+  echo "  ⚠️  Rollout didn't complete within 10 min — continuing anyway."
+  echo "     This is normal on Autopilot first boot (nodes scale on-demand)."
+  echo "     Check status with:"
+  echo "       kubectl get pods -n stock-agent -w"
+  echo "       kubectl describe pod -n stock-agent -l app=agent-runtime"
+fi
 
 PODS=$(kubectl get pods -n stock-agent -l app=agent-runtime \
   --no-headers 2>/dev/null | grep -c "Running" || echo "0")
-echo "  ✅ ${PODS} agent-runtime pod(s) running"
+echo "  ✅ ${PODS} agent-runtime pod(s) running (may climb as Autopilot scales)"
 
 # ---------------------------------------------------------------------------
 # Done!

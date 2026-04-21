@@ -337,3 +337,12 @@ Manager; you don't need to paste it anywhere else.
   ```
   If you pulled the latest `scripts/setup-gcp.sh`, this is handled
   automatically as Step 1.6 (idempotent).
+- **Lab 4 `make setup-gcp` exits with `timed out waiting for the condition`
+  on the agent-runtime rollout** → GKE Autopilot first-boot provisions
+  nodes on-demand and routinely takes 4-8 minutes. If you pulled the
+  latest script this is already non-fatal (10 min + soft-fail). The app
+  is still deployed; check with:
+  ```bash
+  kubectl get pods -n stock-agent -w
+  make show-urls
+  ```
