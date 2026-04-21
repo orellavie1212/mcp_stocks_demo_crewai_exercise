@@ -184,6 +184,29 @@ Service URLs:
 | MCP docs      | http://localhost:8001/docs      |
 | Langfuse UI   | http://localhost:3000           |
 
+### Rebuilding after a `requirements.txt` or `.env` change
+
+`make lab3-up` uses `docker compose up --build`, which still reads from the pip
+layer cache. If dependencies changed (or you just pulled new code) and the old
+`llm.str / llm.BaseLLM Input should be a valid string` error comes back, force
+a clean rebuild:
+
+```bash
+git pull                     # make sure pinned requirements.txt files are on disk
+make lab3-rebuild            # down --rmi local, build --no-cache, up -d
+```
+
+Then verify the versions actually installed in the container match the pins:
+
+```bash
+docker compose -f docker/docker-compose.yml exec agent-runtime \
+  pip show crewai langchain langchain-core langchain-google-genai \
+  | grep -E '^(Name|Version)'
+```
+
+Expected: `crewai 1.10.1`, `langchain 1.2.12`, `langchain-core 1.2.18`,
+`langchain-google-genai 4.2.1`.
+
 ---
 
 ## 7) Lab 4 — GCP
@@ -275,3 +298,12 @@ Manager; you don't need to paste it anywhere else.
     or `platform : win-64` — that's your Windows conda. Install linux Miniforge inside
     WSL using the snippet in section 3 above and recreate the env there; both condas
     can coexist without conflict.
+- **Lab 3 worker keeps throwing `llm.str` / `llm.BaseLLM` validation errors** after
+  `make lab3-up` → `requirements.txt` on disk still has the old unpinned CrewAI/LangChain
+  (either your branch is behind or a local edit was never committed). Check:
+  ```bash
+  grep -E '^(crewai|langchain)' apps/agent-runtime/requirements.txt
+  ```
+  You should see `crewai==1.10.1`, `langchain==1.2.12`, `langchain-core==1.2.18`,
+  `langchain-google-genai==4.2.1`. If not, `git pull` (or commit your local pins),
+  then run `make lab3-rebuild`.
