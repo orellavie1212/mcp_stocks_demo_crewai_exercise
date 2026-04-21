@@ -346,3 +346,23 @@ Manager; you don't need to paste it anywhere else.
   kubectl get pods -n stock-agent -w
   make show-urls
   ```
+- **Lab 4 `make teardown` fails at `google_compute_subnetwork.subnet` with
+  `resourceInUseByAnotherResource` pointing at `serverless-ipv4-...`** →
+  Cloud Run Direct VPC Egress (`--network/--subnet/--vpc-egress`) leaves a
+  hidden `serverless-ipv4-<id>` compute address behind when services are
+  deleted async. Terraform doesn't know about it, so the subnet destroy
+  fails while the address still references it. The latest
+  `scripts/teardown-gcp.sh` waits for the service deletes and cleans these
+  up automatically (Step 1b). On an older copy, clean up manually and
+  re-run:
+  ```bash
+  PROJECT=<your-project-id>
+  REGION=us-central1
+  gcloud compute addresses list --project="$PROJECT" \
+    --filter="name ~ ^serverless-ipv4 AND region:$REGION" \
+    --format="value(name)" | while read -r addr; do
+      gcloud compute addresses delete "$addr" \
+        --region="$REGION" --project="$PROJECT" --quiet
+    done
+  make teardown-yes GCP_PROJECT="$PROJECT" GCP_REGION="$REGION"
+  ```
