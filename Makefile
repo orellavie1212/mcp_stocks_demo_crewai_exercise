@@ -12,7 +12,7 @@
 # =============================================================================
 
 .PHONY: help up down logs test lint build push deploy-run deploy-gke \
-        infra-up infra-down setup-gcp seed-secrets clean
+        infra-up infra-down setup-gcp seed-secrets clean lab3-rebuild
 
 # Load environment variables from .env if it exists
 -include .env
@@ -50,6 +50,17 @@ lab3-up: ## Start full local stack (all services + Redis + Pub/Sub emulator + La
 
 lab3-down: ## Stop local stack
 	$(DC) down
+
+lab3-rebuild: ## Nuclear rebuild: drop local images, --no-cache build, restart stack (use after requirements.txt changes)
+	$(DC) down --rmi local
+	$(DC) build --no-cache mcp-server job-api agent-runtime frontend-streamlit
+	$(DC) up -d
+	@echo ""
+	@echo "✅ Stack rebuilt from scratch."
+	@echo "  Streamlit UI : http://localhost:8501"
+	@echo "  Job API      : http://localhost:8000/docs"
+	@echo "  MCP Server   : http://localhost:8001/docs"
+	@echo "  Langfuse UI  : http://localhost:3000"
 
 logs: ## Tail logs from all services
 	$(DC) logs -f
