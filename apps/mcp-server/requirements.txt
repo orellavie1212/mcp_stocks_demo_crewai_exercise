@@ -12,8 +12,9 @@ python-dotenv>=1.0
 fastmcp>=0.2.5
 
 # LLM (for /explain endpoint)
-langchain-core>=0.2
-langchain-google-genai>=1.0    # Local dev (Google AI Studio)
+# Pinned to versions verified working on macOS alongside the agent-runtime.
+langchain-core==1.2.18
+langchain-google-genai==4.2.1  # Local dev (Google AI Studio)
 langchain-google-vertexai>=1.0 # Production (Vertex AI / Workload Identity)
 
 # Observability
