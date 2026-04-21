@@ -122,6 +122,31 @@ gcloud services enable \
 echo "  ✅ Bootstrap APIs enabled"
 
 # ---------------------------------------------------------------------------
+# Step 1.6: Ensure Firestore default DB exists BEFORE Terraform runs
+# ---------------------------------------------------------------------------
+# Teaching note: main.tf declares an `import` block for
+# google_firestore_database.default. Terraform imports are strict — they fail
+# with "Cannot import non-existent remote object" if the DB doesn't exist.
+# On a fresh project the DB hasn't been created yet, so we pre-create it via
+# gcloud here. This keeps the Terraform import block (which handles the 7-day
+# deletion-lock idempotency on re-runs) and makes first-run work without
+# restructuring main.tf.
+echo ""
+echo "🔥 Step 1.6: Ensuring Firestore default DB exists..."
+if gcloud firestore databases describe \
+    --database='(default)' --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  ⏭️  Firestore default DB already exists"
+else
+  echo "  Creating Firestore default DB (location=${REGION}, type=firestore-native)..."
+  gcloud firestore databases create \
+    --location="${REGION}" \
+    --database='(default)' \
+    --type=firestore-native \
+    --project="${PROJECT_ID}"
+  echo "  ✅ Firestore default DB created"
+fi
+
+# ---------------------------------------------------------------------------
 # Step 2: Terraform — provision ALL infrastructure
 # ---------------------------------------------------------------------------
 echo ""
