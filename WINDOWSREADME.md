@@ -230,6 +230,13 @@ Manager; you don't need to paste it anywhere else.
   ```bash
   dos2unix .env
   ```
+- **Pydantic bool/int parse error at startup** (e.g. `input_value='false  '`, `bool_parsing`) → your `.env` has trailing whitespace in a value, usually because a line was copied with a `KEY=value  # comment` still attached. `python-dotenv` strips the `# comment` but not the spaces before it, so pydantic receives `'false  '` and rejects it. Fix:
+  ```bash
+  # Option A — recreate .env from the cleaned .env.example
+  cp .env.example .env && nano .env      # re-paste GEMINI_API_KEY
+  # Option B — strip inline comments in-place
+  sed -i 's/[[:space:]]*#.*$//' .env
+  ```
 - **`docker` not found inside WSL** → Docker Desktop → Settings → Resources → WSL
   Integration → toggle your distro on → restart Docker Desktop.
 - **`make`, `conda`, or `terraform` not found** → you are running the Windows binary
