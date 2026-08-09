@@ -70,6 +70,22 @@ class AnalysisRequest(BaseModel):
         default=None,
         description="Client-provided dedup key. If provided, duplicate submissions return the same job."
     )
+    provider: Optional[str] = Field(
+        default=None,
+        description=(
+            "Model vendor for this run: 'openai', 'google_ai_studio', or "
+            "'vertex_ai'. Omitted, it follows the agent-runtime's LLM_PROVIDER "
+            "env var. Lets a student switch providers per request without "
+            "touching .env — see GET /providers for which ones are configured."
+        ),
+    )
+    # Deliberately NOT here: an api_key field. AnalysisRequest is embedded in
+    # JobRecord and persisted to Firestore, then echoed back verbatim by
+    # GET /jobs/{job_id} (see JobStatusResponse.from_job_record) — a secret
+    # living here would be stored at rest and handed back to every poller.
+    # A per-request key travels only on PubSubMessage.api_key, which is the
+    # transient job-api→agent-runtime envelope and is never persisted or
+    # returned to the frontend.
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="Arbitrary key/value pairs for extensibility"
@@ -259,6 +275,16 @@ class PubSubMessage(BaseModel):
     )
     published_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
+    )
+    api_key: str = Field(
+        default="",
+        description=(
+            "This run's provider API key, if the requester supplied one. "
+            "Lives here rather than on `request` — this message is the "
+            "transient job-api→agent-runtime envelope (Pub/Sub or direct "
+            "HTTP), never written to Firestore and never echoed back by "
+            "GET /jobs/{job_id}, unlike `request`."
+        ),
     )
 
 

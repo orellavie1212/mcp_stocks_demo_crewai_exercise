@@ -1,6 +1,7 @@
 fastapi>=0.110
 uvicorn>=0.23
 pydantic>=2.6
+pydantic-settings>=2.2
 pandas>=2.0
 numpy>=1.26
 yfinance>=0.2.50
@@ -10,11 +11,13 @@ streamlit>=1.36
 fastmcp>=0.2.5
 matplotlib
 
-# CrewAI + Gemini (Lab 1 — original demo on Gemini)
+# CrewAI (Lab 1 — original demo, provider switcher shared with Labs 2-4:
+# LLM_PROVIDER=openai|google_ai_studio|vertex_ai — see packages/shared-config)
 # Pinned to versions verified working on macOS. CrewAI >=1.12 tightened Agent.llm
 # validation and rejects raw langchain chat-model objects, breaking Labs 2/3 on
 # fresh installs. Update with care.
 crewai==1.10.1
 langchain==1.2.12
 langchain-google-genai==4.2.1
+langchain-openai>=0.2
 

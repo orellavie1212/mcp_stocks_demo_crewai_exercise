@@ -6,6 +6,7 @@ This module contains all agent-related code including agent creation,
 task creation, and the main analysis execution function.
 """
 
+import contextlib
 import json
 import os
 import sys
@@ -27,6 +28,27 @@ try:
 except ImportError:
     CREWAI_AVAILABLE = False
 
+# Same provider switcher (OpenAI/google_ai_studio/vertex_ai, optionally
+# routed through the LiteLLM proxy) and evidence-grounding guardrail that
+# apps/agent-runtime uses — Lab 1 gets consistent behavior with Labs 2-4
+# instead of its own separate, Gemini-only LLM setup.
+_here = os.path.dirname(os.path.abspath(__file__))
+for _p in [
+    os.path.join(_here, "packages", "shared-config"),
+    os.path.join(_here, "packages", "shared-guardrails"),
+    os.path.join(_here, "packages", "shared-observability"),
+]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+try:
+    from config import get_settings, get_llm
+    from grounding import check_report as check_report_grounding
+    from tool_tracer import ToolTracer
+    SHARED_CONFIG_AVAILABLE = True
+except ImportError:
+    SHARED_CONFIG_AVAILABLE = False
+
 try:
     from mcp_server import (
         get_tools_by_names,
@@ -42,22 +64,74 @@ except ImportError:
     def get_tools_by_names(tool_names: list, openai_api_key: str = "") -> list:
         return []
 
+
+def _hallucination_guardrail(llm):
+    """CrewAI's own built-in output guardrail, attached to the report task
+    as a teaching contrast against grounding.check_report() above.
+
+    Same helper as apps/agent-runtime/worker.py::_hallucination_guardrail —
+    see that docstring for why this is wired up for the contrast, not the
+    protection: it's a no-op in the open-source crewai package (only the
+    hosted platform installs the real check it defers to). `enforcing` is
+    detected from the module's `_validate_output_hook` sentinel rather than
+    hardcoded, so it keeps telling the truth if that ever changes.
+
+    Returns (guardrail_or_None, status_dict).
+    """
+    try:
+        from crewai.tasks.hallucination_guardrail import HallucinationGuardrail
+        from crewai.tasks import hallucination_guardrail as _hg_module
+    except ImportError:
+        return None, {
+            "available": False,
+            "enforcing": False,
+            "note": "This crewai build has no HallucinationGuardrail.",
+        }
+
+    enforcing = callable(getattr(_hg_module, "_validate_output_hook", None))
+    status = {
+        "available": True,
+        "enforcing": enforcing,
+        "note": (
+            "CrewAI's HallucinationGuardrail is active on the report task."
+            if enforcing else
+            "CrewAI's HallucinationGuardrail is attached to the report task "
+            "but is a no-op in the open-source package — it passes every "
+            "output. The grounding check above is what's actually verifying "
+            "figures against tool evidence."
+        ),
+    }
+    return HallucinationGuardrail(llm=llm), status
+
+
 def create_agents(
     gemini_api_key: str = "",
     research_tools: Optional[List[str]] = None,
     technical_tools: Optional[List[str]] = None,
     sector_tools: Optional[List[str]] = None,
-    report_tools: Optional[List[str]] = None
+    report_tools: Optional[List[str]] = None,
+    provider: Optional[str] = None,
+    api_key: str = "",
 ) -> Dict[str, Agent]:
     """
     Create CrewAI agents with configurable tools.
 
     Args:
-        gemini_api_key: Gemini API key for LLM calls (optional if using LLM_PROVIDER=vertex_ai)
+        gemini_api_key: Gemini API key. Two uses: (1) the crew's own LLM
+            when provider/api_key are omitted — kept for backward
+            compatibility; (2) always fed to get_explanation, which is a
+            separate, Gemini/Vertex-only tool (see mcp_server.py::explain)
+            unaffected by provider/api_key below.
         research_tools: List of tool names for research agent
         technical_tools: List of tool names for technical agent
         sector_tools: List of tool names for sector agent
         report_tools: List of tool names for report agent
+        provider: Crew LLM vendor — 'openai', 'google_ai_studio', or
+            'vertex_ai'. Omitted, follows LLM_PROVIDER (or gemini_api_key,
+            for backward compatibility with callers that only ever set
+            that). Same switcher apps/agent-runtime uses.
+        api_key: This run's key for `provider`, when it isn't Gemini's
+            (which uses gemini_api_key instead, for backward compatibility).
 
     Returns:
         Dictionary of agents
@@ -65,37 +139,46 @@ def create_agents(
     if not CREWAI_AVAILABLE:
         return {}
 
-    llm_provider = os.environ.get("LLM_PROVIDER", "google_ai_studio")
-    from crewai import LLM as CrewLLM
-    
-    gcp_project = os.environ.get("GCP_PROJECT", "local-project")
-    gcp_region = os.environ.get("GCP_REGION", "us-central1")
-
-    if llm_provider == "vertex_ai" or not gemini_api_key:
-        # Clear Google/Gemini API key env vars to prevent Google SDK from getting confused and bypassing ADC
-        os.environ.pop("GEMINI_API_KEY", None)
-        os.environ.pop("GOOGLE_API_KEY", None)
-        
-        # Force system environment variables to global for LiteLLM and LangChain Vertex AI compatibility
-        vertex_loc = os.environ.get("VERTEX_LOCATION", "global")
-        os.environ["VERTEX_LOCATION"] = vertex_loc
-        os.environ["VERTEX_AI_LOCATION"] = vertex_loc
-        os.environ["VERTEX_API_LOCATION"] = vertex_loc
-
-        gemini_llm = CrewLLM(
-            model="vertex_ai/gemini-3.5-flash",
-            vertex_project=gcp_project,
-            vertex_location=vertex_loc,
-            temperature=0.0
-        )
+    if SHARED_CONFIG_AVAILABLE:
+        # Same provider switcher apps/agent-runtime uses (openai /
+        # google_ai_studio / vertex_ai, or the LiteLLM proxy when
+        # LITELLM_BASE_URL is set) — driven by LLM_PROVIDER in .env by
+        # default. provider=/api_key= (or a sidebar-entered gemini_api_key,
+        # for the Gemini/Vertex case) override it for a single run.
+        if gemini_api_key:
+            os.environ["GEMINI_API_KEY"] = gemini_api_key
+            get_settings.cache_clear()
+        effective_api_key = api_key or (gemini_api_key if provider in (None, "google_ai_studio") else "")
+        main_llm = get_llm("main", provider=provider, api_key=effective_api_key)
     else:
-        os.environ["GEMINI_API_KEY"] = gemini_api_key
-        gemini_llm = CrewLLM(
-            model="gemini/gemini-3.5-flash",
-            api_key=gemini_api_key,
-            temperature=0.0
-        )
- 
+        # Fallback for running agents.py standalone, without packages/
+        # present (e.g. a bare checkout of just the Lab 1 files).
+        llm_provider = os.environ.get("LLM_PROVIDER", "google_ai_studio")
+        from crewai import LLM as CrewLLM
+
+        gcp_project = os.environ.get("GCP_PROJECT", "local-project")
+
+        if llm_provider == "vertex_ai" or not gemini_api_key:
+            os.environ.pop("GEMINI_API_KEY", None)
+            os.environ.pop("GOOGLE_API_KEY", None)
+            vertex_loc = os.environ.get("VERTEX_LOCATION", "global")
+            os.environ["VERTEX_LOCATION"] = vertex_loc
+            os.environ["VERTEX_AI_LOCATION"] = vertex_loc
+            os.environ["VERTEX_API_LOCATION"] = vertex_loc
+            main_llm = CrewLLM(
+                model="vertex_ai/gemini-3.5-flash",
+                vertex_project=gcp_project,
+                vertex_location=vertex_loc,
+                temperature=0.0
+            )
+        else:
+            os.environ["GEMINI_API_KEY"] = gemini_api_key
+            main_llm = CrewLLM(
+                model="gemini/gemini-3.5-flash",
+                api_key=gemini_api_key,
+                temperature=0.0
+            )
+
     if research_tools is None:
         research_tools = ["search_symbols", "get_quote", "get_price_series"]
     if technical_tools is None:
@@ -117,7 +200,7 @@ def create_agents(
         Your expertise lies in efficiently gathering and organizing stock data from multiple sources.
         You excel at finding relevant information quickly and presenting it in a clear, structured format.""",
         tools=research_tool_funcs,
-        llm=gemini_llm,
+        llm=main_llm,
         verbose=True,
         allow_delegation=False
     )
@@ -129,7 +212,7 @@ def create_agents(
         You specialize in interpreting technical signals, identifying patterns, and understanding market psychology.
         Your analysis is methodical and based on proven technical analysis principles.""",
         tools=technical_tool_funcs,
-        llm=gemini_llm,
+        llm=main_llm,
         verbose=True,
         allow_delegation=False
     )
@@ -142,7 +225,7 @@ def create_agents(
         Your expertise lies in understanding how individual stocks perform within their sector context
         and identifying which companies are sector leaders or laggards.""",
         tools=sector_tool_funcs,
-        llm=gemini_llm,
+        llm=main_llm,
         verbose=True,
         allow_delegation=False
     )
@@ -154,7 +237,7 @@ def create_agents(
         actionable reports. You have a talent for presenting technical information in an accessible way while maintaining
         accuracy and professional standards. Your reports are known for their clarity and practical insights.""",
         tools=report_tool_funcs,
-        llm=gemini_llm,
+        llm=main_llm,
         verbose=True,
         allow_delegation=False
     )
@@ -310,16 +393,34 @@ def run_crewai_analysis(
     research_tools: Optional[List[str]] = None,
     technical_tools: Optional[List[str]] = None,
     sector_tools: Optional[List[str]] = None,
-    report_tools: Optional[List[str]] = None
+    report_tools: Optional[List[str]] = None,
+    provider: Optional[str] = None,
+    api_key: str = "",
 ) -> Dict[str, Any]:
-    """Run CrewAI analysis with progress tracking"""
+    """Run CrewAI analysis with progress tracking.
+
+    provider/api_key pick the crew's own LLM vendor for this run — 'openai',
+    'google_ai_studio', or 'vertex_ai' — same switcher apps/agent-runtime
+    uses. Omitted, `provider` follows LLM_PROVIDER same as before. Kept
+    separate from gemini_api_key, which is Gemini/Vertex-only and also
+    feeds the unrelated get_explanation tool (see create_agents' docstring).
+    """
     if not CREWAI_AVAILABLE:
         return {"error": "CrewAI not available"}
 
     gemini_api_key = gemini_api_key.strip() if gemini_api_key else ""
-    llm_provider = os.environ.get("LLM_PROVIDER", "google_ai_studio")
+    api_key = api_key.strip() if api_key else ""
+    llm_provider = (provider or os.environ.get("LLM_PROVIDER", "google_ai_studio")).strip().lower()
 
-    if llm_provider != "vertex_ai" and not gemini_api_key:
+    if llm_provider == "openai":
+        if not api_key:
+            return {
+                "success": False,
+                "error": "OpenAI API key is required. Please enter it in the sidebar.",
+                "timestamp": datetime.now().isoformat(),
+                "symbol": symbol,
+            }
+    elif llm_provider != "vertex_ai" and not gemini_api_key:
         env_api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
         if env_api_key:
             gemini_api_key = env_api_key
@@ -334,7 +435,7 @@ def run_crewai_analysis(
     if llm_provider == "vertex_ai":
         os.environ.pop("GEMINI_API_KEY", None)
         os.environ.pop("GOOGLE_API_KEY", None)
-    elif gemini_api_key:
+    elif llm_provider != "openai" and gemini_api_key:
         os.environ["GOOGLE_API_KEY"] = gemini_api_key
 
     try:
@@ -344,7 +445,10 @@ def run_crewai_analysis(
         if progress_callback:
             progress_callback("🔧 Creating agents...", 5)
 
-        agents = create_agents(gemini_api_key, research_tools, technical_tools, sector_tools, report_tools)
+        agents = create_agents(
+            gemini_api_key, research_tools, technical_tools, sector_tools, report_tools,
+            provider=llm_provider, api_key=api_key,
+        )
 
         if progress_callback:
             progress_callback("📋 Setting up tasks...", 8)
@@ -355,7 +459,10 @@ def run_crewai_analysis(
         tasks[1].agent = agents["technical"]
         tasks[2].agent = agents["sector"]
         tasks[3].agent = agents["report"]
-        
+
+        hallucination_guardrail, hallucination_status = _hallucination_guardrail(agents["report"].llm)
+        tasks[3].guardrail = hallucination_guardrail
+
         if progress_callback:
             progress_callback("👥 Assembling crew...", 10)
         
@@ -420,13 +527,19 @@ def run_crewai_analysis(
                 verbose_capture = VerboseCapture(verbose_callback)
                 sys.stdout = verbose_capture
                 sys.stderr = verbose_capture
-            
-            result = crew.kickoff()
-            
+
+            # ToolTracer listens on CrewAI's own event bus, so it captures
+            # every tool call regardless of how Lab 1 wires them up
+            # (in-process, unlike apps/agent-runtime's real MCP calls) — it
+            # feeds the same evidence-grounding check the other labs use.
+            _tracer_cm = ToolTracer() if SHARED_CONFIG_AVAILABLE else contextlib.nullcontext()
+            with _tracer_cm as _grounding_tracer:
+                result = crew.kickoff()
+
             if verbose_callback:
                 sys.stdout = old_stdout
                 sys.stderr = old_stderr
-            
+
             timer.cancel()
         except Exception as e:
             if verbose_callback:
@@ -434,22 +547,27 @@ def run_crewai_analysis(
                 sys.stderr = old_stderr
             timer.cancel()
             raise e
-        
+
         if progress_callback:
             progress_callback("🎉 Analysis completed successfully!", 100)
-        
+
         from mcp_server import get_tool_trace
         tool_trace = get_tool_trace()
-        
-        return {
+
+        result_text = str(result)
+        response = {
             "success": True,
-            "result": str(result),
+            "result": result_text,
             "timestamp": datetime.now().isoformat(),
             "symbol": symbol,
             "tool_trace": tool_trace,
             "tool_calls_count": len(tool_trace),
             "tool_calls_successful": sum(1 for t in tool_trace if t.get("success", False))
         }
+        if SHARED_CONFIG_AVAILABLE and _grounding_tracer.evidence:
+            response["guardrail"] = check_report_grounding(result_text, _grounding_tracer.evidence)
+        response["crewai_guardrail"] = hallucination_status
+        return response
         
     except Exception as e:
         return {

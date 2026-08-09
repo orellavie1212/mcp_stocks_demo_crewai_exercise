@@ -24,6 +24,7 @@ Teaching note:
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import base64
 import hashlib
 import json
@@ -32,7 +33,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from crewai import Agent, Crew, Process, Task
@@ -54,6 +55,7 @@ from observability import (
     setup_logging, CorrelatedLogger, LangfuseTracer,
     set_correlation, get_trace_id, get_job_id, estimate_cost,
 )
+from tool_tracer import ToolTracer
 
 # Langfuse decorators work without any LangChain dependency.
 # langfuse.callback.CallbackHandler is broken with langchain 1.x (missing
@@ -75,26 +77,49 @@ log = CorrelatedLogger("agent-runtime")
 tracer = LangfuseTracer(enabled=settings.langfuse_enabled)
 
 
+#: Tool names the mcp-server exposes over real MCP (Streamable HTTP), matching
+#: its @mcp.tool() functions exactly (see apps/mcp-server/server.py). "explain"
+#: is deliberately not here — it calls an LLM directly and sits above MCP, not
+#: as an MCP data tool (same design note as upstream/main's mcp_server.py).
+_MCP_TOOL_NAMES = {"search_symbols", "latest_quote", "price_series", "indicators", "detect_events"}
+
+
 class MCPClient:
     """
-    HTTP client for the MCP server.
+    Real MCP client (Streamable HTTP transport) for the mcp-server's 5 data
+    tools, plus a plain REST call for /explain.
 
     Teaching note:
-      In the demo, agents.py did `from mcp_server import get_tools_by_names`.
-      That's a direct Python import — tightly coupled.
+      The previous version of this class called the MCP server's REST routes
+      over plain httpx — decorated with MCP scaffolding that was never run.
+      This version speaks real MCP JSON-RPC to the /mcp sub-app mounted by
+      apps/mcp-server/server.py (mcp.streamable_http_app()).
 
-      Now, the agent-runtime calls the MCP server via HTTP.
-      Benefits:
-      - MCP server can be deployed/updated independently
-      - Different languages could implement the MCP server
-      - Tool calls are visible in network logs (debuggable)
-      - MCP server can be rate-limited independently
+      CrewAI 1.x runs tool functions as plain sync callables inside a
+      ThreadPoolExecutor, while process_job() itself runs on the main asyncio
+      event loop. The mcp SDK's ClientSession is async-only, and opening a
+      *second* event loop inside that worker thread (asyncio.run()) is what
+      broke the old REST-based sync client (see the exception it used to
+      raise: "asyncio.run() cannot be called from a running event loop").
+      So instead of opening a fresh connection per call, one MCPClient opens a
+      single ClientSession on the main loop (__aenter__, before crew.kickoff())
+      and each sync tool callback hands its call to that same loop via
+      asyncio.run_coroutine_threadsafe() — the supported way to invoke
+      coroutine-based code from a different thread without touching the event
+      loop machinery itself.
     """
 
     def __init__(self, base_url: str, timeout: int = 30):
         self.base_url = base_url.rstrip("/")
+        # Trailing slash matches the mcp-server's mount exactly (Starlette
+        # otherwise 307-redirects "/mcp" -> "/mcp/" — httpx follows that by
+        # default so it would still work, just with an avoidable round trip).
+        self.mcp_url = f"{self.base_url}/mcp/"
         self.timeout = timeout
         self._tool_trace: List[ToolCallRecord] = []
+        self._session: Optional["ClientSession"] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._exit_stack: Optional[AsyncExitStack] = None
 
     def _make_headers(self) -> Dict[str, str]:
         """Pass correlation IDs to the MCP server for end-to-end tracing."""
@@ -102,101 +127,103 @@ class MCPClient:
             "X-Trace-ID": get_trace_id(),
             "X-Job-ID": get_job_id(),
             "X-Internal-Token": settings.internal_api_token,
-            "Content-Type": "application/json",
         }
 
-    async def call(self, tool: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Call an MCP tool endpoint and return the parsed JSON response.
-        Records tool call in the trace for the job record.
-        """
-        start = time.perf_counter()
+    async def __aenter__(self) -> "MCPClient":
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
+        self._loop = asyncio.get_running_loop()
+        self._exit_stack = AsyncExitStack()
+        read, write, _ = await self._exit_stack.enter_async_context(
+            streamablehttp_client(
+                self.mcp_url,
+                headers=self._make_headers(),
+                timeout=self.timeout,
+            )
+        )
+        self._session = await self._exit_stack.enter_async_context(ClientSession(read, write))
+        await self._session.initialize()
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        if self._exit_stack is not None:
+            await self._exit_stack.aclose()
+        self._session = None
+        self._exit_stack = None
+
+    def _record(self, tool: str, payload: Dict[str, Any], start: float, result: Any = None, error: Optional[str] = None) -> None:
+        duration_ms = (time.perf_counter() - start) * 1000
         record = ToolCallRecord(
             tool_name=tool,
             arguments=payload,
+            success=error is None,
+            duration_ms=round(duration_ms, 1),
+            result_preview=str(result)[:300] if result is not None else "",
+            error=error,
         )
+        self._tool_trace.append(record)
+        if error is None:
+            log.info("MCP tool call succeeded", tool_name=tool, duration_ms=record.duration_ms)
+        else:
+            log.error(f"MCP tool call failed: {error}", tool_name=tool, duration_ms=duration_ms)
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.post(
-                    f"{self.base_url}/{tool}",
-                    json=payload,
-                    headers=self._make_headers(),
-                )
-                response.raise_for_status()
-                result = response.json()
-                duration_ms = (time.perf_counter() - start) * 1000
+    def _call_mcp_tool_sync(self, tool: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Call a real MCP tool from a CrewAI tool callback (sync, worker thread)."""
+        import json as _json
 
-                record.success = True
-                record.duration_ms = round(duration_ms, 1)
-                record.result_preview = str(result)[:300]
-                self._tool_trace.append(record)
-
-                log.info(
-                    f"MCP tool call succeeded",
-                    tool_name=tool,
-                    duration_ms=record.duration_ms,
-                )
-                return result
-
-            except Exception as e:
-                duration_ms = (time.perf_counter() - start) * 1000
-                record.success = False
-                record.error = str(e)
-                record.duration_ms = round(duration_ms, 1)
-                self._tool_trace.append(record)
-
-                log.error(
-                    f"MCP tool call failed: {e}",
-                    tool_name=tool,
-                    duration_ms=duration_ms,
-                )
-                return {"error": str(e)}
-
-    def call_sync(self, tool: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Synchronous HTTP call for use inside CrewAI tool callbacks.
-
-        Teaching note:
-          CrewAI 1.x runs tool functions as plain sync callables inside a
-          ThreadPoolExecutor. The outer process_job() runs in an async event
-          loop, so asyncio.run() inside a tool raises:
-            'asyncio.run() cannot be called from a running event loop'
-          Solution: use httpx.Client (blocking) for the tool layer.
-          The outer async infrastructure (Redis, job-api PATCH, etc.) is
-          unaffected — only the per-tool MCP call uses sync I/O here.
-        """
         start = time.perf_counter()
-        record = ToolCallRecord(tool_name=tool, arguments=payload)
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._session.call_tool(tool, payload), self._loop
+            )
+            call_result = future.result(timeout=self.timeout)
+            # Every tool in apps/mcp-server/server.py returns a single JSON
+            # string in its first TextContent block (json.dumps(...)).
+            text = "".join(
+                block.text for block in call_result.content if getattr(block, "text", None)
+            )
+            result = _json.loads(text) if text else {}
+            if call_result.isError:
+                error = result.get("error") or result.get("message") or "MCP tool error"
+                self._record(tool, payload, start, error=error)
+                return {"error": error}
+            self._record(tool, payload, start, result=result)
+            return result
+        except Exception as e:
+            # concurrent.futures.TimeoutError's str() is '' — a blank error
+            # message is a dead end when debugging a real timeout (e.g. many
+            # crews hitting a single-process mcp-server concurrently in Lab
+            # 2, which has no horizontal scaling the way Lab 3's Pub/Sub
+            # workers do). Fall back to the exception's class name so
+            # there's always something to go on.
+            message = str(e) or f"{type(e).__name__} after {self.timeout}s"
+            self._record(tool, payload, start, error=message)
+            return {"error": message}
 
+    def _call_rest_sync(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Plain REST call for endpoints with no MCP tool equivalent (/explain)."""
+        start = time.perf_counter()
         with httpx.Client(timeout=self.timeout) as client:
             try:
                 response = client.post(
-                    f"{self.base_url}/{tool}",
+                    f"{self.base_url}/{path}",
                     json=payload,
-                    headers=self._make_headers(),
+                    headers={**self._make_headers(), "Content-Type": "application/json"},
                 )
                 response.raise_for_status()
                 result = response.json()
-                duration_ms = (time.perf_counter() - start) * 1000
-
-                record.success = True
-                record.duration_ms = round(duration_ms, 1)
-                record.result_preview = str(result)[:300]
-                self._tool_trace.append(record)
-
-                log.info("MCP tool call succeeded", tool_name=tool, duration_ms=record.duration_ms)
+                self._record(path, payload, start, result=result)
                 return result
-
             except Exception as e:
-                duration_ms = (time.perf_counter() - start) * 1000
-                record.success = False
-                record.error = str(e)
-                record.duration_ms = round(duration_ms, 1)
-                self._tool_trace.append(record)
-
-                log.error(f"MCP tool call failed: {e}", tool_name=tool, duration_ms=duration_ms)
+                self._record(path, payload, start, error=str(e))
                 return {"error": str(e)}
+
+    def call_sync(self, tool: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch to a real MCP tool call, or REST for /explain."""
+        if tool in _MCP_TOOL_NAMES:
+            return self._call_mcp_tool_sync(tool, payload)
+        return self._call_rest_sync(tool, payload)
 
     @property
     def tool_trace(self) -> List[ToolCallRecord]:
@@ -224,7 +251,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("search_symbols", {"q": q})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        result = mcp.call_sync("search", {"q": q})
+        result = mcp.call_sync("search_symbols", {"query": q})
         if isinstance(result, list):
             lines = [f"• {r.get('symbol')}: {r.get('name')}" for r in result[:5] if r.get('symbol')]
             return "\n".join(lines) if lines else "No results found."
@@ -236,7 +263,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("latest_quote", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = mcp.call_sync("quote", {"symbol": symbol.upper()})
+        r = mcp.call_sync("latest_quote", {"symbol": symbol.upper()})
         if r.get("error"):
             return f"Error: {r['error']}"
         price = r.get("price")
@@ -256,7 +283,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("price_series", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        result = mcp.call_sync("series", {"symbol": symbol.upper(), "lookback": 180})
+        result = mcp.call_sync("price_series", {"symbol": symbol.upper(), "lookback": 180})
         if isinstance(result, list) and result:
             closes = [float(r.get("close", 0)) for r in result if r.get("close")]
             if closes:
@@ -297,7 +324,7 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
         guard = guardrail.check_tool_call("detect_events", {"symbol": symbol})
         if not guard.allowed:
             return f"Tool blocked: {guard.reason}"
-        r = mcp.call_sync("events", {"symbol": symbol.upper()})
+        r = mcp.call_sync("detect_events", {"symbol": symbol.upper()})
         if r.get("error"):
             return f"Error: {r['error']}"
         events = []
@@ -326,13 +353,67 @@ def make_crewai_tools(mcp: MCPClient, guardrail: GuardrailPipeline):
     return [search_symbols, latest_quote, price_series, indicators, detect_events, explain]
 
 
-def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipeline, lf_trace=None) -> Crew:
+def _hallucination_guardrail(llm) -> Tuple[Optional[Any], Dict[str, Any]]:
+    """CrewAI's own built-in output guardrail, attached to the report task
+    as a teaching contrast against guardrails.check_output() below.
+
+    READ THIS BEFORE TRUSTING IT: in the open-source crewai package,
+    HallucinationGuardrail.__call__ is a placeholder — it returns
+    (True, output) for every input and logs a link to the hosted platform.
+    Only crewai's hosted product installs the real
+    `_validate_output_hook` this class defers to. Handed a report that
+    invents a number, it passes. That's exactly why guardrails.py's
+    deterministic evidence-grounding check (fed by ToolTracer, run after
+    kickoff) is the one actually verifying anything here — this is wired
+    up so the gap between "attached" and "enforcing" is visible, not hidden.
+
+    `enforcing` is detected rather than hardcoded: the placeholder's
+    __call__ defers to a module-level `_validate_output_hook`, so "is that
+    hook callable?" is the same question the class itself asks. If crewai
+    ever ships the real check in open source, this starts reporting true
+    without a code change here.
+    """
+    try:
+        from crewai.tasks.hallucination_guardrail import HallucinationGuardrail
+        from crewai.tasks import hallucination_guardrail as _hg_module
+    except ImportError:
+        return None, {
+            "available": False,
+            "enforcing": False,
+            "note": "This crewai build has no HallucinationGuardrail.",
+        }
+
+    enforcing = callable(getattr(_hg_module, "_validate_output_hook", None))
+    status = {
+        "available": True,
+        "enforcing": enforcing,
+        "note": (
+            "CrewAI's HallucinationGuardrail is active on the report task."
+            if enforcing else
+            "CrewAI's HallucinationGuardrail is attached to the report task "
+            "but is a no-op in the open-source package — it passes every "
+            "output. The 'grounding' check is what's actually verifying "
+            "figures against tool evidence."
+        ),
+    }
+    return HallucinationGuardrail(llm=llm), status
+
+
+def build_crew(
+    symbol: str,
+    query: str,
+    mcp: MCPClient,
+    guardrail: GuardrailPipeline,
+    lf_trace=None,
+    provider: Optional[str] = None,
+    api_key: str = "",
+) -> Tuple[Crew, Dict[str, Any]]:
     """
     Build the 4-agent CrewAI crew.
 
     Teaching note:
       Same 4 agents as the demo, but now:
-      - They use Gemini instead of OpenAI
+      - They use Gemini instead of OpenAI (by default — see provider/api_key)
       - Their tools call the MCP server over HTTP (not direct import)
       - The Langfuse callback auto-traces every LLM call
       - Model routing: all agents use MAIN tier (gemini-3.5-flash)
@@ -340,14 +421,18 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
 
       Pass lf_trace so the CrewAI LLM spans are nested under the
       same job trace in Langfuse (visible as a single trace tree).
+
+      provider/api_key come from the request (AnalysisRequest.provider,
+      PubSubMessage.api_key) and override LLM_PROVIDER/.env for this run
+      only — see get_llm()'s docstring in shared-config/config.py.
     """
     tools = make_crewai_tools(mcp, guardrail)
     research_tools = tools[:3]
     technical_tools = tools[3:]
     sector_tools = tools[:2] + [tools[3]]
 
-    main_llm = get_llm("main")
-    strong_llm = get_llm("strong")
+    main_llm = get_llm("main", provider=provider, api_key=api_key)
+    strong_llm = get_llm("strong", provider=provider, api_key=api_key)
 
     langfuse_cb = tracer.get_callback(trace=lf_trace)
     callbacks = [langfuse_cb] if langfuse_cb else []
@@ -440,6 +525,8 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
         context=[research_task, technical_task],
     )
 
+    hallucination_guardrail, hallucination_status = _hallucination_guardrail(strong_llm)
+
     report_task = Task(
         description=(
             f"Write a comprehensive analysis report for '{symbol}' "
@@ -450,15 +537,17 @@ def build_crew(symbol: str, query: str, mcp: MCPClient, guardrail: GuardrailPipe
         expected_output="Professional investment analysis report (no financial advice).",
         agent=report_agent,
         context=[research_task, technical_task, sector_task],
+        guardrail=hallucination_guardrail,
     )
 
-    return Crew(
+    crew = Crew(
         agents=[research_agent, technical_agent, sector_agent, report_agent],
         tasks=[research_task, technical_task, sector_task, report_task],
         process=Process.sequential,
         verbose=True,
         callbacks=callbacks,
     )
+    return crew, hallucination_status
 
 
 def _cache_key(query: str, symbols: List[str]) -> str:
@@ -521,10 +610,21 @@ async def set_cached_result(query: str, symbols: List[str], result: str):
 
 
 async def update_job(job_id: str, updates: Dict[str, Any]):
-    """Send a PATCH request to the job-api to update job status."""
+    """Send a PATCH request to the job-api to update job status.
+
+    Checks the response status explicitly: httpx doesn't raise on a non-2xx
+    response on its own, so a rejected PATCH (wrong X-Internal-Token, job-api
+    restarted and lost its in-memory job record, a 500 mid-request) would
+    otherwise fail completely silently — this call returns normally, the
+    worker logs "Job completed successfully", and the frontend is left
+    polling a job stuck on RUNNING forever with nothing in any log
+    explaining why. That combination (silent PATCH failure + Lab 2's
+    in-memory job-api store, which is empty again after any job-api
+    restart) is the most common cause of "the UI never shows the report."
+    """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            await client.patch(
+            resp = await client.patch(
                 f"{settings.job_api_url}/jobs/{job_id}",
                 json=updates,
                 headers={
@@ -532,15 +632,32 @@ async def update_job(job_id: str, updates: Dict[str, Any]):
                     "X-Trace-ID": get_trace_id(),
                 },
             )
+            if resp.status_code >= 400:
+                log.warning(
+                    f"Job status update rejected by job-api: "
+                    f"{resp.status_code} {resp.text[:300]}",
+                    job_id=job_id,
+                    job_api_url=settings.job_api_url,
+                )
     except Exception as e:
         log.warning(f"Job status update failed: {e}", job_id=job_id)
 
 
-async def process_job(message: PubSubMessage) -> bool:
+async def process_job(message: PubSubMessage, allow_retry: bool = True) -> bool:
     """
     Process a single analysis job.
 
     Returns True if successful, False if should be retried.
+
+    allow_retry=True (the default, used by the Pub/Sub path) means a
+    failure below pubsub_max_retries is left as RUNNING rather than
+    FAILED, on the assumption that Pub/Sub will redeliver the message and
+    a later attempt will finish the job. analyze_sync() (Lab 2's direct
+    HTTP mode) passes allow_retry=False: there is no redelivery in that
+    mode — nothing will ever call this again for the same job — so the
+    same logic would leave the job stuck on RUNNING forever with no error
+    surfaced anywhere. See update_job()'s docstring for why that failure
+    mode is easy to miss (no error in job-api's own logs, either).
     """
     set_correlation(trace_id=message.trace_id, job_id=message.job_id)
     log.info("Processing job", job_id=message.job_id, attempt=message.attempt_number)
@@ -609,29 +726,56 @@ async def process_job(message: PubSubMessage) -> bool:
         return _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
     try:
-        crew = build_crew(primary_symbol, request.query, mcp, guardrail, lf_trace=lf_trace)
+        # The MCP session (real Streamable HTTP protocol against mcp-server's
+        # /mcp sub-app) must stay open for the whole crew run: tools call it
+        # lazily, only once an agent actually invokes them during kickoff().
+        async with mcp:
+            crew, hallucination_status = build_crew(
+                primary_symbol, request.query, mcp, guardrail, lf_trace=lf_trace,
+                provider=request.provider, api_key=message.api_key,
+            )
 
-        # Use langfuse.decorators.observe for job-level tracing.
-        # langfuse.callback.CallbackHandler (LangChain-based) is broken with
-        # langchain 1.x — the decorators API works without any langchain dependency.
-        # This captures: input query, final output, total duration.
-        # Per-LLM-call prompts/tokens require Langfuse server v3 + SDK v3 + OTel.
-        if _LANGFUSE_DECORATORS_OK and settings.langfuse_enabled:
-            @_langfuse_observe(name="crew-analysis")
-            def _kickoff():
-                _lf_ctx.update_current_trace(
-                    session_id=message.job_id,
-                    user_id=request.user_id,
-                    metadata={"symbol": primary_symbol, "query": request.query},
-                )
-                return crew.kickoff()
-            result = _kickoff()
-        else:
-            result = crew.kickoff()
+            # Use langfuse.decorators.observe for job-level tracing.
+            # langfuse.callback.CallbackHandler (LangChain-based) is broken with
+            # langchain 1.x — the decorators API works without any langchain dependency.
+            # This captures: input query, final output, total duration.
+            # Per-LLM-call prompts/tokens require Langfuse server v3 + SDK v3 + OTel.
+            # ToolTracer listens on CrewAI's own event bus, so it captures every
+            # tool call regardless of transport (in-process, HTTP, or real MCP)
+            # — it feeds the evidence-grounding check below.
+            with ToolTracer() as grounding_tracer:
+                # await asyncio.to_thread(...), not a direct call: crew.kickoff()
+                # is a long blocking synchronous call, and process_job() runs on
+                # the same event loop MCPClient captured as self._loop
+                # (__aenter__). Call it directly here and that thread — the
+                # loop's own thread — never returns to run_forever() until
+                # kickoff() is done, so it can never pick up the
+                # asyncio.run_coroutine_threadsafe(..., self._loop) calls that
+                # CrewAI's tool-execution thread makes from inside kickoff().
+                # Every MCP tool call then blocks for the full 30s client
+                # timeout and fails — not because mcp-server is slow (its own
+                # logs show sub-second responses), but because the coroutine
+                # waiting to fetch that response is never scheduled. Running
+                # kickoff() in its own thread leaves this thread's loop free to
+                # actually service those calls.
+                if _LANGFUSE_DECORATORS_OK and settings.langfuse_enabled:
+                    @_langfuse_observe(name="crew-analysis")
+                    def _kickoff():
+                        _lf_ctx.update_current_trace(
+                            session_id=message.job_id,
+                            user_id=request.user_id,
+                            metadata={"symbol": primary_symbol, "query": request.query},
+                        )
+                        return crew.kickoff()
+                    result = await asyncio.to_thread(_kickoff)
+                else:
+                    result = await asyncio.to_thread(crew.kickoff)
 
         result_text = _strip_ansi(str(result))
 
-        safe_output, output_events = guardrail.check_output(result_text)
+        safe_output, output_events = guardrail.check_output(
+            result_text, evidence=grounding_tracer.evidence
+        )
         guardrail_events += [
             {
                 "layer": "OUTPUT",
@@ -641,6 +785,16 @@ async def process_job(message: PubSubMessage) -> bool:
             }
             for r in output_events
         ]
+        # Informational only, like grounding: reports whether CrewAI's own
+        # built-in guardrail (attached to the report task in build_crew) is
+        # actually enforcing anything in this crewai install, or just
+        # logging a no-op — see _hallucination_guardrail()'s docstring.
+        guardrail_events.append({
+            "layer": "OUTPUT",
+            "check_name": "crewai_hallucination_guardrail",
+            "decision": "ALLOW",
+            "reason": hallucination_status.get("note", ""),
+        })
 
         await set_cached_result(request.query, symbols, safe_output)
 
@@ -666,7 +820,7 @@ async def process_job(message: PubSubMessage) -> bool:
         log.error(f"Job processing failed: {e}", job_id=message.job_id)
         tracer.flush()
 
-        if message.attempt_number >= settings.pubsub_max_retries:
+        if not allow_retry or message.attempt_number >= settings.pubsub_max_retries:
             await update_job(message.job_id, {
                 "status": "FAILED",
                 "last_error": str(e),
@@ -767,13 +921,24 @@ async def analyze_sync(body: Dict[str, Any]):
     if "request" in body and "job_id" in body:
         message = PubSubMessage.model_validate(body)
     else:
+        # A flat request (no PubSubMessage envelope) is how you'd call this
+        # directly while testing — e.g. curl -d '{"query": "...",
+        # "provider": "openai", "api_key": "sk-..."}'. api_key isn't a field
+        # on AnalysisRequest (it must not end up in a persisted JobRecord —
+        # see the note on PubSubMessage.api_key), so it's pulled off here.
+        body = dict(body)
+        flat_api_key = body.pop("api_key", "")
         request = AnalysisRequest(**body)
         message = PubSubMessage(
             job_id=str(uuid.uuid4()),
             request=request,
             trace_id=str(uuid.uuid4()),
+            api_key=flat_api_key,
         )
-    success = await process_job(message)
+    # allow_retry=False: this is a direct HTTP call with no Pub/Sub behind
+    # it, so nothing will ever retry a failed attempt — a failure must be
+    # marked FAILED immediately or the job is stuck on RUNNING forever.
+    success = await process_job(message, allow_retry=False)
     return {"job_id": message.job_id, "success": success}
 
 

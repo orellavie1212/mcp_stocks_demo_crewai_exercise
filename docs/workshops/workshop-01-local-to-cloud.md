@@ -91,7 +91,7 @@ You'll see the same `trace_id` in `job-api`, `agent-runtime`, and `mcp-server` l
 
 ### 2.4 Explore Langfuse
 
-Open http://localhost:3000 (admin@localhost / admin123)
+Open http://localhost:3000 (admin@example.com / admin123)
 
 - Click on a trace
 - See every Gemini call: prompt, response, tokens, cost

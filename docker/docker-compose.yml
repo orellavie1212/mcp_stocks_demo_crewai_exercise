@@ -37,6 +37,10 @@ x-common-env: &common-env
   GEMINI_FAST_MODEL: gemini-3.1-flash-lite
   GEMINI_MAIN_MODEL: gemini-3.5-flash
   GEMINI_STRONG_MODEL: gemini-3.1-pro-preview
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_FAST_MODEL: ${OPENAI_FAST_MODEL:-gpt-4o-mini}
+  OPENAI_MAIN_MODEL: ${OPENAI_MAIN_MODEL:-gpt-4o-mini}
+  OPENAI_STRONG_MODEL: ${OPENAI_STRONG_MODEL:-gpt-4o}
 
   # Service URLs (using Docker internal DNS)
   MCP_SERVER_URL: http://mcp-server:8001
@@ -64,6 +68,13 @@ x-common-env: &common-env
   LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local}
   LANGFUSE_ENABLED: "true"
 
+  # LiteLLM proxy — set by default so Lab 3 routes every LLM call through it
+  # (see packages/shared-config/config.py::get_llm). Labs 1-2 run without
+  # Docker, so LITELLM_BASE_URL stays unset there and get_llm() falls back to
+  # calling providers directly — no proxy container exists outside compose.
+  LITELLM_BASE_URL: http://litellm-proxy:4000
+  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-litellm-master}
+
   # Security
   INTERNAL_API_TOKEN: dev-token-local
   API_AUTH_ENABLED: "false"
@@ -82,7 +93,7 @@ networks:
 
 volumes:
   redis-data:
-  langfuse-postgres-data:
+  postgres-data:
 
 services:
 
@@ -153,15 +164,22 @@ services:
   # Teaching note: Self-hosted, completely free!
   # ---------------------------------------------------------------------------
 
-  langfuse-postgres:
+  # Shared Postgres instance — Langfuse's own DB (created via POSTGRES_USER/
+  # POSTGRES_DB below) plus a second "litellm" database for litellm-proxy's
+  # admin UI, added by docker/postgres-init/init-litellm-db.sql (only runs
+  # on a fresh/empty volume, same as any docker-entrypoint-initdb.d script).
+  # One instance, two logical databases — not two containers — to save the
+  # resource footprint of a second full Postgres for a local teaching lab.
+  postgres:
     image: postgres:16-alpine
-    container_name: stock-agent-langfuse-db
+    container_name: stock-agent-postgres
     environment:
       POSTGRES_USER: langfuse
       POSTGRES_PASSWORD: langfuse_local
       POSTGRES_DB: langfuse
     volumes:
-      - langfuse-postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       - stock-agent-net
     healthcheck:
@@ -174,12 +192,12 @@ services:
     image: langfuse/langfuse:2
     container_name: stock-agent-langfuse
     depends_on:
-      langfuse-postgres:
+      postgres:
         condition: service_healthy
     ports:
       - "3000:3000"
     environment:
-      DATABASE_URL: postgresql://langfuse:langfuse_local@langfuse-postgres:5432/langfuse
+      DATABASE_URL: postgresql://langfuse:langfuse_local@postgres:5432/langfuse
       NEXTAUTH_SECRET: local-secret-change-in-prod
       NEXTAUTH_URL: http://localhost:3000
       SALT: local-salt-change-in-prod
@@ -208,6 +226,61 @@ services:
       start_period: 30s
 
   # ---------------------------------------------------------------------------
+  # LiteLLM Proxy (routes every LLM call, reports to Langfuse natively)
+  # ---------------------------------------------------------------------------
+
+  litellm-proxy:
+    build:
+      context: ./litellm
+      dockerfile: Dockerfile
+    container_name: stock-agent-litellm
+    restart: unless-stopped
+    depends_on:
+      langfuse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4010:4000"
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-litellm-master}
+      # Backs the /ui admin dashboard (spend graphs, request logs, virtual
+      # key management) — without this litellm-proxy runs fine (routing,
+      # budget/parallel-request limits, the Langfuse callback are all
+      # in-memory, no DB needed for any of that) but /ui's login fails with
+      # "Not connected to DB!", since there's nowhere to store/read an admin
+      # user against. Shares the `postgres` service above with Langfuse (a
+      # separate "litellm" database on it, seeded by
+      # docker/postgres-init/init-litellm-db.sql) rather than its own
+      # container — one Postgres instance for the whole local stack.
+      DATABASE_URL: postgresql://litellm:litellm_local@postgres:5432/litellm
+      LANGFUSE_HOST: http://langfuse:3000
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local}
+      # Vertex AI backend (config.yaml's vertex-* model_list entries): no
+      # API key, Application Default Credentials instead — the same
+      # `gcloud auth application-default login` session your host already
+      # has, via the read-only mount below. If you've never run that
+      # command, the mount is still harmless (an empty directory) — the
+      # vertex-* models just won't authenticate; Google AI Studio/OpenAI
+      # are unaffected.
+      GCP_PROJECT: ${GCP_PROJECT:-local-project}
+      VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
+      GOOGLE_APPLICATION_CREDENTIALS: /gcloud-config/application_default_credentials.json
+    volumes:
+      - ${HOME}/.config/gcloud:/gcloud-config:ro
+    networks:
+      - stock-agent-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
   # Application Services
   # ---------------------------------------------------------------------------
 
@@ -224,6 +297,9 @@ services:
       PORT: "8001"
     volumes:
       - ~/.config/gcloud:/home/appuser/.config/gcloud:ro
+    depends_on:
+      litellm-proxy:
+        condition: service_healthy
     networks:
       - stock-agent-net
     healthcheck:

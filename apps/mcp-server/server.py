@@ -31,6 +31,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, Field
 
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -162,6 +163,27 @@ def _coerce_close(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty or "close" not in df.columns:
         return pd.Series(dtype="float64")
     return pd.to_numeric(df["close"], errors="coerce").dropna()
+
+
+def _extract_text_content(content) -> str:
+    """Normalize a LangChain message .content into plain text.
+
+    response.content is documented as str | list[str | dict] — newer
+    langchain-google-genai responses can come back as a list of parts
+    (e.g. [{"type": "text", "text": "..."}]) instead of a plain string.
+    Used by /explain below, which previously returned that list as-is.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(part.get("text", ""))
+        return "".join(parts)
+    return str(content) if content else ""
 
 
 class SearchRequest(BaseModel):
@@ -346,7 +368,13 @@ async def route_explain(body: ExplainRequest):
         evt = events_resp if isinstance(events_resp, dict) else {}
 
         from config import get_llm
-        llm = get_llm("main")
+        # langchain_only=True: this route calls .invoke() with langchain_core
+        # message objects below. Without this, get_llm() returns crewai's own
+        # LLM class whenever crewai happens to be importable in this process
+        # (e.g. a local dev venv shared with agent-runtime) — crewai.LLM has
+        # no .invoke(), so that silently breaks this endpoint even though
+        # mcp-server's own requirements.txt never asked for crewai.
+        llm = get_llm("main", langchain_only=True)
 
         system_prompt = (
             "You are an impartial market analyst. Summarize technical signals clearly. "
@@ -371,7 +399,7 @@ async def route_explain(body: ExplainRequest):
         ]
 
         response = llm.invoke(messages)
-        text = response.content if hasattr(response, "content") else str(response)
+        text = _extract_text_content(response.content) if hasattr(response, "content") else str(response)
 
         log.info("explain called", symbol=body.symbol, language=body.language)
         return {
@@ -396,7 +424,35 @@ async def route_bundle(symbol: str, lookback: int = 180):
     return {"series": series, "indicators": indicators, "events": events}
 
 
-mcp = FastMCP("stocks-analyzer")
+# stateless_http=True: each MCP request is self-contained (no server-side
+# session pinned to one process). Cloud Run/GKE can scale this service to
+# multiple instances and load-balance across them without sticky sessions —
+# a stateful session tied to whichever instance handled `initialize` would
+# break the moment a later request landed on a different instance.
+#
+# streamable_http_path="/": mcp.streamable_http_app() already builds its own
+# Starlette route at this path *inside* the sub-app it returns (default
+# "/mcp"). Mounting that sub-app at app.mount("/mcp", ...) below while
+# leaving the default would put the real endpoint at /mcp/mcp, not /mcp/ —
+# setting it to "/" here makes the effective, externally-visible path the
+# mount point itself (/mcp/).
+# DNS-rebinding host/origin checks default to on and reject anything not on
+# an explicit allowlist — a good default for a locally-run stdio/SSE dev
+# server a browser could reach at localhost, but this service's Host header
+# varies by environment (mcp-server:8001 in Docker Compose, localhost:8001 in
+# Lab 2, a dynamic *.run.app hostname in Cloud Run, a K8s service DNS name in
+# GKE) and it already sits behind X-Internal-Token auth and its own network
+# boundary — an allowlist here would just mean re-deriving it per environment
+# for a threat model (malicious browser JS hitting a public localhost server)
+# that doesn't apply to an internal, token-gated backend service.
+_transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+mcp = FastMCP(
+    "stocks-analyzer",
+    stateless_http=True,
+    streamable_http_path="/",
+    transport_security=_transport_security,
+)
 
 @mcp.tool()
 def search_symbols(query: str) -> str:
@@ -422,6 +478,116 @@ def price_series(symbol: str, interval: str = "daily", lookback: int = 180) -> s
         return df.to_json(orient="records", date_format="iso")
     except Exception as e:
         return json.dumps({"symbol": symbol, "error": "series_failed", "message": str(e)})
+
+@mcp.tool()
+def indicators(
+    symbol: str,
+    window_sma: int = 20,
+    window_ema: int = 50,
+    window_rsi: int = 14,
+) -> str:
+    """Compute SMA, EMA, RSI technical indicators for a symbol.
+
+    Call this rather than computing SMA/EMA/RSI yourself.
+
+    Args:
+        symbol: Ticker symbol, e.g. "AAPL".
+        window_sma: Simple moving average window in days (default: 20).
+        window_ema: Exponential moving average span in days (default: 50).
+        window_rsi: RSI period in days (default: 14).
+
+    Returns:
+        JSON object with symbol, last_close, sma, ema, rsi.
+    """
+    try:
+        df = ds_series(symbol, "daily", 300)
+        close = _coerce_close(df)
+        if close.empty:
+            return json.dumps({"symbol": symbol, "error": "no_data"})
+        return json.dumps({
+            "symbol": symbol,
+            "last_close": float(close.iloc[-1]),
+            "sma": float(calc_sma(close, window_sma).iloc[-1]),
+            "ema": float(calc_ema(close, window_ema).iloc[-1]),
+            "rsi": float(calc_rsi(close, window_rsi).iloc[-1]),
+        })
+    except Exception as e:
+        return json.dumps({"symbol": symbol, "error": "indicators_failed", "message": str(e)})
+
+@mcp.tool()
+def detect_events(symbol: str) -> str:
+    """Detect gap up/down, volatility spikes, and 52-week extremes for a symbol.
+
+    Call this rather than inferring events from the price series yourself.
+
+    Args:
+        symbol: Ticker symbol, e.g. "AAPL".
+
+    Returns:
+        JSON object with symbol, date, and the boolean flags gap_up, gap_down,
+        vol_spike, is_52w_high, is_52w_low.
+    """
+    try:
+        df = ds_series(symbol, "daily", 400)
+        if df is None or df.empty:
+            return json.dumps({"symbol": symbol, "error": "no_data"})
+        for c in ["open", "high", "low", "close", "volume"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=["open", "close"]).reset_index(drop=True)
+        if df.empty:
+            return json.dumps({"symbol": symbol, "error": "no_valid_data"})
+        df = flag_gaps(df)
+        df = flag_volatility(df)
+        df = flag_52w_extremes(df)
+        last = df.iloc[-1]
+        return json.dumps({
+            "symbol": symbol,
+            "date": str(pd.to_datetime(last["date"]).date()) if "date" in df.columns else None,
+            "gap_up": bool(last.get("gap_up", False)),
+            "gap_down": bool(last.get("gap_down", False)),
+            "vol_spike": bool(last.get("vol_spike", False)),
+            "is_52w_high": bool(last.get("is_52w_high", False)),
+            "is_52w_low": bool(last.get("is_52w_low", False)),
+        })
+    except Exception as e:
+        return json.dumps({"symbol": symbol, "error": "events_failed", "message": str(e)})
+
+
+# Real MCP protocol, mounted alongside the plain REST routes above.
+#
+# Teaching note (this is the fix for the historical "decorative MCP" bug):
+#   Previously this `mcp` object was built and decorated but never given a
+#   transport — nothing ever called .run() or served it, so the FastMCP
+#   scaffolding above was dead code and all real traffic went through the
+#   plain REST routes instead. Mounting mcp.streamable_http_app() here makes
+#   /mcp a genuine MCP JSON-RPC endpoint (Streamable HTTP transport) on this
+#   same Cloud Run/GKE service, so agent-runtime's MCPClient can be a real MCP
+#   client without this service losing its independent-deployment shape.
+#   /explain has no MCP tool equivalent — it calls an LLM directly and stays
+#   plain REST, same design as upstream/main's mcp_server.py.
+app.mount("/mcp", mcp.streamable_http_app())
+
+# The Streamable HTTP transport's session manager runs a background task
+# group that has to be started before any /mcp request is served — normally
+# via the ASGI lifespan protocol. `app` was already constructed above (before
+# `mcp` existed), so FastAPI's `lifespan=` constructor argument isn't an
+# option here; reassigning app.router.lifespan_context is the documented way
+# to graft FastMCP's session manager onto an app built without one. Without
+# this, every real /mcp request fails with "Session terminated" once
+# deployed behind uvicorn's real lifespan (a test using an ASGI transport
+# that skips lifespan entirely won't catch this — drive
+# mcp.session_manager.run() directly in such tests instead).
+from contextlib import asynccontextmanager as _asynccontextmanager
+
+
+@_asynccontextmanager
+async def _mcp_lifespan(_app):
+    async with mcp.session_manager.run():
+        yield
+
+
+app.router.lifespan_context = _mcp_lifespan
 
 
 if __name__ == "__main__":

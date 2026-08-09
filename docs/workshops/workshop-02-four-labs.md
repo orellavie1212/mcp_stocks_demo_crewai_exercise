@@ -31,6 +31,8 @@ git clone https://github.com/zviba/mcp_stocks_demo_crewai_exercise.git
 cd mcp_stocks_demo_crewai_exercise
 cp .env.example .env
 # Set GEMINI_API_KEY in .env (free key: https://aistudio.google.com/apikey)
+# Or set LLM_PROVIDER=openai and OPENAI_API_KEY instead — every lab uses the
+# same provider switcher (packages/shared-config), so either works everywhere.
 ```
 
 ---
@@ -68,7 +70,7 @@ Browser ──► streamlit_crewai_app.py  (blocks until done, ~1-2 min)
 | File | Role |
 |------|------|
 | `streamlit_crewai_app.py` | Web UI, calls `run_crewai_analysis()` directly |
-| `agents.py` | Agent + task definitions, `crewai.LLM` with Gemini |
+| `agents.py` | Agent + task definitions, `crewai.LLM` — Gemini, Vertex AI, or OpenAI (sidebar picker) |
 | `mcp_server.py` | `@tool`-decorated functions, `get_tools_by_names()` |
 | `datasource.py` | yfinance wrapper |
 | `api.py` | FastAPI `/health` endpoint (checked by the Streamlit app) |
@@ -87,13 +89,14 @@ uvicorn api:app --host 127.0.0.1 --port 8001
 streamlit run streamlit_crewai_app.py
 ```
 
-Open http://localhost:8501, enter your Gemini API key in the sidebar, type `AAPL`, click **Start Analysis**.
+Open http://localhost:8501. In the sidebar, pick an **LLM Provider** — Google AI Studio, Vertex AI (ADC), or OpenAI — enter that provider's API key (Vertex AI needs none), type `AAPL`, click **Start Analysis**.
 
 ### What to Observe
 - The browser tab spins for 1-2 minutes while the crew runs
 - Open a second tab → try to submit another query → it also blocks
 - There is no retry if the analysis fails halfway
 - You can't see which tool call took the longest
+- The report-writing task has CrewAI's built-in `HallucinationGuardrail` attached (visible in the result's `crewai_guardrail` field) — in the open-source `crewai` package it's a no-op that passes every output; the actual check is the deterministic `guardrail` (grounding) field next to it, built from the real tool-call evidence
 
 ### Discussion Questions
 1. What happens if 10 students submit at the same time?
@@ -249,16 +252,33 @@ Browser ──► frontend-streamlit :8501
                 ▼
             agent-runtime (Pub/Sub mode)
             (subscribes to analysis-requests topic)
-                │  POST /search /quote /indicators…
+                │  real MCP protocol (/mcp) + /explain
                 ▼
-            mcp-server :8001
-                │
-                ▼
-            Redis :6379 ◄── result cache (TTL 1h)
-
-Langfuse :3000 ◄── LLM traces from agent-runtime
-langfuse-postgres ◄── Langfuse database
+            mcp-server :8001 ──► litellm-proxy :4010 ──► Gemini / OpenAI
+                │                      │
+                ▼                      ▼
+            Redis :6379          Langfuse :3000 ◄── native litellm callback
+            (result cache,             ▲
+             TTL 1h)                postgres
+                              (shared: langfuse + litellm databases)
 ```
+
+LiteLLM Proxy is the *default* LLM route in this lab (`LITELLM_BASE_URL` is set for
+you in `docker-compose.yml`) — every Gemini/OpenAI call from agent-runtime and
+mcp-server's `/explain` goes through it, and it reports each one to Langfuse itself
+(`success_callback: ["langfuse"]` in `docker/litellm/config.yaml`) with no
+application code involved.
+
+**Per-request provider override.** The frontend sidebar calls `GET /providers`
+on job-api to show which vendors are configured server-side, and lets a student
+pick a different one — with their own API key — for a single run, without
+touching `.env`. `POST /jobs` accepts optional `provider`/`api_key` fields that
+flow through job-api → agent-runtime's `get_llm(provider=, api_key=)`; a
+request-level key bypasses the LiteLLM proxy and calls the vendor directly
+(the proxy's `config.yaml` only knows the server's own keys), and the key
+itself is never persisted to Firestore or echoed back by `GET /jobs/{id}` —
+only `provider` is (see the note on `AnalysisRequest`/`PubSubMessage` in
+`packages/shared-models/models.py`).
 
 ### Docker Compose Stack
 
@@ -267,9 +287,10 @@ langfuse-postgres ◄── Langfuse database
 | `redis` | redis:7-alpine | 6379 | Cache + rate limiting |
 | `pubsub-emulator` | google-cloud-cli | 8085 | GCP Pub/Sub locally |
 | `pubsub-init` | google-cloud-cli | — | Creates topics/subscriptions (runs once) |
-| `langfuse-postgres` | postgres:16 | — | Langfuse database |
+| `postgres` | postgres:16 | — | Shared DB: Langfuse's data + a separate `litellm` database for LiteLLM's admin UI |
 | `langfuse` | langfuse/langfuse | 3000 | LLM observability UI |
-| `mcp-server` | built locally | 8001 | Stock data tools |
+| `litellm-proxy` | built locally (`docker/litellm/`) | 4010 | Routes every LLM call, traces to Langfuse; `/ui` for spend/usage (admin / `LITELLM_MASTER_KEY`) |
+| `mcp-server` | built locally | 8001 | Stock data tools (real MCP + REST) |
 | `job-api` | built locally | 8000 | Async job gateway |
 | `agent-runtime` | built locally | 8002 | CrewAI workers |
 | `frontend-streamlit` | built locally | 8501 | Web UI |
@@ -277,11 +298,11 @@ langfuse-postgres ◄── Langfuse database
 ### Run Instructions
 
 ```bash
-# Ensure .env has GEMINI_API_KEY set
-cat .env | grep GEMINI_API_KEY
+# Ensure .env has GEMINI_API_KEY set (or LLM_PROVIDER=openai + OPENAI_API_KEY)
+cat .env | grep -E "GEMINI_API_KEY|OPENAI_API_KEY"
 
 # Start the full stack (builds images on first run ~5 min)
-make up
+make lab3-up
 
 # Or directly:
 docker compose -f docker/docker-compose.yml up --build -d
@@ -295,12 +316,13 @@ make logs
 1. redis → healthy
 2. pubsub-emulator → healthy
 3. pubsub-init → creates topics → exits (service_completed_successfully)
-4. langfuse-postgres → healthy
+4. postgres → healthy
 5. langfuse → healthy
-6. mcp-server → healthy
-7. job-api → healthy (depends on redis + pubsub)
-8. agent-runtime → starts (depends on mcp-server + job-api + redis + pubsub-init)
-9. frontend-streamlit → healthy (depends on job-api)
+6. litellm-proxy → healthy (depends on langfuse + postgres)
+7. mcp-server → healthy
+8. job-api → healthy (depends on redis + pubsub)
+9. agent-runtime → starts (depends on mcp-server + job-api + redis + pubsub-init)
+10. frontend-streamlit → healthy (depends on job-api)
 ```
 
 ### Service URLs
@@ -310,10 +332,12 @@ make logs
 | Streamlit UI | http://localhost:8501 |
 | Job API docs | http://localhost:8000/docs |
 | MCP Server docs | http://localhost:8001/docs |
+| MCP Server (real MCP) | http://localhost:8001/mcp/ |
+| LiteLLM Proxy | http://localhost:4010 |
 | Langfuse UI | http://localhost:3000 |
 | Redis CLI | `docker exec -it stock-agent-redis redis-cli` |
 
-**Langfuse login:** admin@localhost / admin123
+**Langfuse login:** admin@example.com / admin123
 
 ### What to Observe
 
@@ -337,11 +361,21 @@ docker exec -it stock-agent-redis redis-cli keys "analysis:*"
 ```
 The second identical request returns in < 100ms with 0 LLM calls.
 
-**4. Langfuse LLM traces:**
+**4. Langfuse LLM traces (via LiteLLM's native callback):**
 Open http://localhost:3000 → Traces → click any trace.
-- See every Gemini call: prompt, response, token count, cost
-- Compare `research_agent` (gemini-3.5-flash) vs `report_agent` (gemini-3.1-pro-preview)
+- See every LLM call: prompt, response, token count, cost — reported by litellm-proxy
+  itself (`success_callback: ["langfuse"]`), not by application code
+- Compare `research_agent` (main tier) vs `report_agent` (strong tier)
 - The `report_agent` uses the STRONG tier model — it runs once and produces the final report
+
+**4b. LiteLLM's own view of the same calls:**
+```bash
+curl -s http://localhost:4010/health/liveliness
+```
+`docker/litellm/config.yaml`'s `general_settings` sets a basic daily budget
+(`max_budget`) and a parallel-request cap — this is the "blocking requests" example:
+push past either and the proxy starts returning `429`s instead of forwarding to the
+vendor.
 
 **5. Scale agent workers:**
 ```bash
@@ -362,8 +396,8 @@ Three workers will now compete for Pub/Sub messages. Submit 5 queries — they'l
 
 ### Cleanup
 ```bash
-make down        # stop all containers (keeps volumes)
-make clean       # stop + remove volumes + images
+make lab3-down    # stop all containers (keeps volumes)
+make clean        # stop + remove volumes + images
 ```
 
 ---
@@ -451,13 +485,23 @@ This script:
 
 **Step 2 — Add your Gemini API key to Secret Manager:**
 ```bash
-# Option A: Use API key (google_ai_studio)
+# Option A: Use API key (google_ai_studio) — passing --gemini-api-key to
+# setup-gcp.sh also seeds it into litellm-proxy alongside its always-on
+# Vertex AI route (see Option B).
 echo -n "your-gemini-api-key" | gcloud secrets versions add gemini-api-key \
   --data-file=- --project=$GCP_PROJECT
 
 # Option B: Use Vertex AI (RECOMMENDED — no API key needed on GCP)
 # Set LLM_PROVIDER=vertex_ai in the deployment and skip this step entirely.
-# The GKE pod's Workload Identity grants access to Vertex AI automatically.
+# litellm-proxy has its own service account (litellm-proxy@..., granted
+# roles/aiplatform.user by infra/terraform/main.tf) and a vertex-* entry
+# in its model_list (docker/litellm/config.yaml) with no api_key — Google's
+# client library falls back to that attached identity automatically, the
+# same no-key pattern mcp-server/agent-runtime already use for their own
+# direct Vertex AI calls. Every service routes through litellm-proxy
+# unconditionally now (LITELLM_BASE_URL is always set), so Vertex AI calls
+# get the same Langfuse tracing + budget/parallel-request caps as the
+# API-key providers, not just Google AI Studio and OpenAI.
 ```
 
 **Step 3 — Verify deployment:**
@@ -555,7 +599,9 @@ The `.github/workflows/ci-cd.yml` pipeline:
 | Distributed tracing | ❌ No | ❌ No | ❌ No | ✅ Cloud Trace |
 | Scale workers | ❌ No | ❌ No | `--scale N` | HPA auto |
 | API keys in code | ⚠️ Sidebar | ⚠️ .env file | ⚠️ .env file | ✅ Secret Manager |
-| Gemini auth | API key | API key | API key | Workload Identity |
+| LLM auth | API key (OpenAI or Gemini) | API key | API key, via LiteLLM Proxy | Workload Identity (or LiteLLM Proxy) |
+| LLM request limits/tracing | ❌ No | ❌ No | ✅ LiteLLM Proxy | ✅ LiteLLM Proxy (opt-in) |
+| MCP protocol | Real MCP | Real MCP | Real MCP | Real MCP |
 | Cost to run | Free | Free | Free | ~$0.50/hr idle |
 
 ---

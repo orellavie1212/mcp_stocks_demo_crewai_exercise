@@ -304,6 +304,29 @@ def detect_events(symbol: str) -> str:
         return json.dumps({"symbol": symbol, "error": "events_failed", "message": str(e)})
 
 
+def _extract_text_content(content) -> str:
+    """Normalize a LangChain message .content into plain text.
+
+    Newer langchain-google-genai responses can return `content` as a list of
+    parts (e.g. [{"type": "text", "text": "..."}], sometimes mixed with plain
+    strings) instead of a single string — response.content is documented as
+    str | list[str | dict]. `.strip()`-ing it directly blows up with
+    "'list' object has no attribute 'strip'" whenever the model returns the
+    list form. This joins whatever text is present, regardless of shape.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(part.get("text", ""))
+        return "".join(parts)
+    return str(content) if content else ""
+
+
 @mcp.tool()
 def explain(
     symbol: str,
@@ -388,7 +411,7 @@ def explain(
         )
 
         response = llm.invoke(prompt_text)
-        content = (response.content or "").strip()
+        content = _extract_text_content(response.content).strip()
 
         if content.startswith("```"):
             parts = content.split("```")

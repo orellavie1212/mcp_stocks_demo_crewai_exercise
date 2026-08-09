@@ -38,3 +38,13 @@ desktop.ini
 # IDE settings
 .vscode/
 .idea/
+
+# Terraform — state files hold resource attributes in plaintext, including
+# sensitive ones (e.g. random_password.langfuse_db/litellm_db results are
+# real, live DB passwords once `terraform apply` has run against a real
+# GCP project). Never commit these.
+infra/terraform/.terraform/
+infra/terraform/terraform.tfstate
+infra/terraform/terraform.tfstate.*
+infra/terraform/*.tfvars
+.terraform.lock.hcl

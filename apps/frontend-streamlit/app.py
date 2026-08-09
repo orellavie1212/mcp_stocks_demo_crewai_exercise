@@ -80,17 +80,36 @@ def check_job_api() -> bool:
         return False
 
 
-def submit_job(query: str, symbols: list, user_id: str) -> Optional[Dict]:
+def get_providers() -> Optional[Dict]:
+    """GET /providers — which vendors this build knows and which are configured."""
+    try:
+        response = requests.get(f"{JOB_API_URL}/providers", timeout=10)
+        if response.status_code == 200:
+            return response.json()
+    except Exception:
+        pass
+    return None
+
+
+def submit_job(
+    query: str, symbols: list, user_id: str,
+    provider: Optional[str] = None, api_key: str = "",
+) -> Optional[Dict]:
     """Submit a job to the Job API. Returns {job_id, status, trace_id} or None."""
     try:
+        body = {
+            "query": query,
+            "symbols": symbols,
+            "user_id": user_id,
+            "idempotency_key": str(uuid.uuid4()),
+        }
+        if provider:
+            body["provider"] = provider
+        if api_key:
+            body["api_key"] = api_key
         response = requests.post(
             f"{JOB_API_URL}/jobs",
-            json={
-                "query": query,
-                "symbols": symbols,
-                "user_id": user_id,
-                "idempotency_key": str(uuid.uuid4()),
-            },
+            json=body,
             timeout=30,  # Cloud Run cold start can take up to ~20s
         )
         if response.status_code in (200, 202):
@@ -279,6 +298,41 @@ def main():
 
         st.markdown("---")
 
+        # LLM provider — per-request override, not just LLM_PROVIDER in .env.
+        # Mirrors GET /providers on job-api: "configured" reflects the
+        # server's own env vars, so a student can see at a glance which
+        # providers already work without pasting a key, and pick a
+        # different one (with their own key) for just this run.
+        st.subheader("🤖 LLM Provider")
+        providers_info = get_providers() if api_ok else None
+        selected_provider = None
+        run_api_key = ""
+        if providers_info:
+            by_name = {p["name"]: p for p in providers_info["providers"]}
+            default_name = providers_info.get("default", "google_ai_studio")
+            names = list(by_name)
+            labels = [
+                f"{by_name[n]['label']}" + (" ✅" if by_name[n]["configured"] else "")
+                for n in names
+            ]
+            default_idx = names.index(default_name) if default_name in names else 0
+            picked = st.selectbox("Provider for this run", options=labels, index=default_idx)
+            selected_provider = names[labels.index(picked)]
+            provider_info = by_name[selected_provider]
+            if not provider_info["configured"]:
+                run_api_key = st.text_input(
+                    f"{provider_info['label']} API key",
+                    type="password",
+                    help=f"Server has no {provider_info['api_key_env']} set — "
+                         "paste one to use this provider for just this run.",
+                )
+            else:
+                st.caption(f"✅ {provider_info['label']} is configured on the server.")
+        else:
+            st.caption("Provider list unavailable — using the server's default (LLM_PROVIDER).")
+
+        st.markdown("---")
+
         # User ID (for rate limiting display)
         st.caption(f"Session ID: `{st.session_state.user_id[:16]}...`")
 
@@ -350,7 +404,10 @@ Streamlit → Job API → Pub/Sub
 
     if submit_btn and query.strip():
         with st.spinner("Submitting job..."):
-            result = submit_job(query.strip(), symbols, st.session_state.user_id)
+            result = submit_job(
+                query.strip(), symbols, st.session_state.user_id,
+                provider=selected_provider, api_key=run_api_key,
+            )
         if result:
             job_id = result["job_id"]
             st.session_state.active_jobs[job_id] = {

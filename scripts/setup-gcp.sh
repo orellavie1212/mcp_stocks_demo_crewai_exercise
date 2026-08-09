@@ -172,6 +172,10 @@ REDIS_PORT=$(terraform output -raw redis_port)
 REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}/0"
 LANGFUSE_DB_CONN=$(terraform output -raw langfuse_db_connection_name)
 LANGFUSE_DB_PASS=$(terraform output -raw langfuse_db_password)
+# Same Cloud SQL instance as Langfuse's (LANGFUSE_DB_CONN above), a separate
+# "litellm" database on it — mirrors the local Docker Compose setup, where
+# litellm-proxy's admin UI shares one Postgres with Langfuse.
+LITELLM_DB_PASS=$(terraform output -raw litellm_db_password)
 # Admin password is fully managed by Terraform — read it here, no manual step
 LF_ADMIN_PASS=$(terraform output -raw langfuse_admin_password)
 
@@ -189,6 +193,10 @@ echo "🔐 Step 3: Seeding secrets..."
 
 # Internal API token
 secret_once "internal-api-token" "$(openssl rand -base64 32)"
+
+# LiteLLM proxy master key (Authorization header the other services use to
+# call litellm-proxy — same secret pattern as internal-api-token above)
+secret_once "litellm-master-key" "$(openssl rand -base64 32)"
 
 # Langfuse project API keys (pk-lf / sk-lf format required by Langfuse)
 # Teaching note: These MUST stay consistent — agents use sk to submit traces,
@@ -214,6 +222,17 @@ echo -n "$LANGFUSE_DB_URL" | gcloud secrets versions add "langfuse-db-url" \
 echo -n "$LANGFUSE_DB_URL" | gcloud secrets create "langfuse-db-url" \
   --data-file=- --project="$PROJECT_ID"
 echo "  ✅ langfuse-db-url updated"
+
+# LiteLLM DATABASE_URL — same Cloud SQL instance/socket as Langfuse's above,
+# different database + user (google_sql_database.litellm / google_sql_user.litellm
+# in Terraform). Backs litellm-proxy's /ui only; routing/budget/tracing all
+# work without it, same as locally.
+LITELLM_DB_URL="postgresql://litellm:${LITELLM_DB_PASS}@localhost/litellm?host=/cloudsql/${LANGFUSE_DB_CONN}"
+echo -n "$LITELLM_DB_URL" | gcloud secrets versions add "litellm-db-url" \
+  --data-file=- --project="$PROJECT_ID" 2>/dev/null || \
+echo -n "$LITELLM_DB_URL" | gcloud secrets create "litellm-db-url" \
+  --data-file=- --project="$PROJECT_ID"
+echo "  ✅ litellm-db-url updated"
 
 # Gemini API key — seed if provided via --gemini-api-key, otherwise warn
 # Teaching note: if GEMINI_API_KEY is passed at make time it lands here in one step.
@@ -266,6 +285,15 @@ for SVC in mcp-server job-api agent-runtime frontend-streamlit; do
   echo "  ✅ ${SVC} pushed"
 done
 
+# litellm-proxy lives at docker/litellm/ (its own build context), not
+# apps/<svc>/ like the services above.
+echo "  Building litellm-proxy..."
+docker build -t "${AR_REPO}/litellm-proxy:latest" \
+  -f "docker/litellm/Dockerfile" "docker/litellm" \
+  --build-arg BUILDKIT_INLINE_CACHE=1
+docker push "${AR_REPO}/litellm-proxy:latest"
+echo "  ✅ litellm-proxy pushed"
+
 # ---------------------------------------------------------------------------
 # Step 5: Deploy application services to Cloud Run
 # ---------------------------------------------------------------------------
@@ -274,13 +302,62 @@ echo "🚀 Step 5: Deploying to Cloud Run..."
 
 CF="--region=${REGION} --project=${PROJECT_ID} --allow-unauthenticated"
 
+# --- LiteLLM Proxy ---
+# Teaching note: deployed with its own service account (litellm-proxy@...,
+# granted roles/aiplatform.user in infra/terraform/main.tf) so its vertex-*
+# model_list entries (docker/litellm/config.yaml) can call Vertex AI the
+# same Workload-Identity-equivalent way mcp-server/agent-runtime already do
+# directly — no key material, an attached IAM identity. google_ai_studio /
+# openai still work exactly as before, via GEMINI_API_KEY/OPENAI_API_KEY
+# when --gemini-api-key was provided; the vertex-* routes need no key at
+# all, so LITELLM_BASE_URL is now wired into every service unconditionally
+# below — there's no longer a "no key, so skip the proxy" case.
+LITELLM_SECRETS="LITELLM_MASTER_KEY=litellm-master-key:latest,DATABASE_URL=litellm-db-url:latest"
+if [[ -n "$GEMINI_KEY_FOR_K8S" ]]; then
+  LITELLM_SECRETS="${LITELLM_SECRETS},GEMINI_API_KEY=gemini-api-key:latest"
+fi
+# --port=4000: Cloud Run defaults to expecting the container on 8080 (the
+# PORT env var it injects); docker/litellm/Dockerfile hardcodes litellm's
+# own --port to 4000 and doesn't read PORT, so without this the health
+# check times out waiting on 8080 while litellm is actually listening on
+# 4000 — deployment fails with "failed to start and listen on the port".
+# --memory=2Gi: 512Mi wasn't enough for litellm's own process alone (693MiB
+# observed); once DATABASE_URL + --add-cloudsql-instances were added for the
+# /ui dashboard, litellm's Prisma client + migration engine pushed that to
+# 1041MiB, exceeding a 1Gi cap too. 2Gi for real headroom instead of
+# re-chasing this a third time. Local Docker Compose never hits this since
+# containers there aren't memory-capped the same way.
+# --add-cloudsql-instances: same Cloud SQL Proxy socket pattern as Langfuse's
+# deploy below — backs DATABASE_URL (litellm-db-url) for the /ui dashboard.
+gcloud run deploy litellm-proxy \
+  --image="${AR_REPO}/litellm-proxy:latest" ${CF} \
+  --service-account="litellm-proxy@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --port=4000 \
+  --add-cloudsql-instances="${LANGFUSE_DB_CONN}" \
+  --set-env-vars="GCP_PROJECT=${PROJECT_ID},VERTEX_LOCATION=global" \
+  --set-secrets="${LITELLM_SECRETS}" \
+  --min-instances=0 --max-instances=3 --memory=2Gi --cpu=1
+
+LITELLM_URL=$(gcloud run services describe litellm-proxy --region="${REGION}" \
+  --project="${PROJECT_ID}" --format="value(status.url)")
+echo "  ✅ LiteLLM Proxy: ${LITELLM_URL}"
+LITELLM_ENV_VAR=",LITELLM_BASE_URL=${LITELLM_URL}"
+
 # --- MCP Server ---
 # Teaching note: CpuAllocPerProjectRegion quota is 20,000 mCPU per project/region.
-# All services combined must stay under that: 3+3+6+3+4 = 19,000 mCPU total.
+# All services combined must stay under that: 3+3+3+6+3+4 = 22,000 mCPU total
+# (litellm-proxy added at 3,000 — see max-instances/cpu above).
+# --set-secrets LITELLM_MASTER_KEY: get_llm()'s litellm-proxy branch
+# (packages/shared-config/config.py) falls back to the hardcoded local-dev
+# default "sk-local-litellm-master" when this env var is unset — which does
+# NOT match the real, randomly-generated master key litellm-proxy actually
+# checks requests against on GCP, causing every call through the proxy to
+# 401 at litellm's own auth layer even though LITELLM_BASE_URL is set.
 gcloud run deploy mcp-server \
   --image="${AR_REPO}/mcp-server:latest" ${CF} \
   --service-account="mcp-server@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --set-env-vars="LLM_PROVIDER=vertex_ai,GCP_PROJECT=${PROJECT_ID},GCP_REGION=${REGION},SERVICE_NAME=mcp-server,ENVIRONMENT=production,LOG_FORMAT=json" \
+  --set-env-vars="LLM_PROVIDER=vertex_ai,GCP_PROJECT=${PROJECT_ID},GCP_REGION=${REGION},SERVICE_NAME=mcp-server,ENVIRONMENT=production,LOG_FORMAT=json${LITELLM_ENV_VAR}" \
+  --set-secrets="LITELLM_MASTER_KEY=litellm-master-key:latest" \
   --min-instances=0 --max-instances=3 --memory=512Mi --cpu=1
 
 MCP_URL=$(gcloud run services describe mcp-server --region="${REGION}" \
@@ -300,7 +377,7 @@ gcloud run deploy job-api \
   --set-env-vars="PUBSUB_PROJECT_ID=${PROJECT_ID},FIRESTORE_PROJECT_ID=${PROJECT_ID},REDIS_URL=${REDIS_URL},ENVIRONMENT=production,LOG_FORMAT=json" \
   --set-secrets="INTERNAL_API_TOKEN=internal-api-token:latest" \
   --network=stock-agent-vpc --subnet=stock-agent-subnet --vpc-egress=private-ranges-only \
-  --min-instances=1 --max-instances=3 --memory=256Mi --cpu=1
+  --min-instances=1 --max-instances=3 --memory=512Mi --cpu=1
 
 JOB_API_URL=$(gcloud run services describe job-api --region="${REGION}" \
   --project="${PROJECT_ID}" --format="value(status.url)")
@@ -311,8 +388,8 @@ echo "  ✅ Job API: ${JOB_API_URL}"
 gcloud run deploy agent-runtime \
   --image="${AR_REPO}/agent-runtime:latest" ${CF} \
   --service-account="agent-runtime@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --set-env-vars="WORKER_MODE=http,LLM_PROVIDER=vertex_ai,MCP_SERVER_URL=${MCP_URL},JOB_API_URL=${JOB_API_URL},PUBSUB_PROJECT_ID=${PROJECT_ID},FIRESTORE_PROJECT_ID=${PROJECT_ID},REDIS_URL=${REDIS_URL},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${REGION},ENVIRONMENT=production,LOG_FORMAT=json,LANGFUSE_ENABLED=true,LANGFUSE_PUBLIC_KEY=${LF_PUBLIC_KEY}" \
-  --set-secrets="INTERNAL_API_TOKEN=internal-api-token:latest,LANGFUSE_SECRET_KEY=langfuse-secret-key:latest" \
+  --set-env-vars="WORKER_MODE=http,LLM_PROVIDER=vertex_ai,MCP_SERVER_URL=${MCP_URL},JOB_API_URL=${JOB_API_URL},PUBSUB_PROJECT_ID=${PROJECT_ID},FIRESTORE_PROJECT_ID=${PROJECT_ID},REDIS_URL=${REDIS_URL},GCP_PROJECT=${PROJECT_ID},GCP_REGION=${REGION},ENVIRONMENT=production,LOG_FORMAT=json,LANGFUSE_ENABLED=true,LANGFUSE_PUBLIC_KEY=${LF_PUBLIC_KEY}${LITELLM_ENV_VAR}" \
+  --set-secrets="INTERNAL_API_TOKEN=internal-api-token:latest,LANGFUSE_SECRET_KEY=langfuse-secret-key:latest,LITELLM_MASTER_KEY=litellm-master-key:latest" \
   --network=stock-agent-vpc --subnet=stock-agent-subnet --vpc-egress=private-ranges-only \
   --min-instances=1 --max-instances=3 --memory=2Gi --cpu=2 --timeout=600
 
@@ -328,7 +405,7 @@ gcloud run services update job-api --region="${REGION}" --project="${PROJECT_ID}
 gcloud run deploy frontend-streamlit \
   --image="${AR_REPO}/frontend-streamlit:latest" ${CF} \
   --set-env-vars="JOB_API_URL=${JOB_API_URL},ENVIRONMENT=production" \
-  --min-instances=0 --max-instances=3 --memory=256Mi --cpu=1
+  --min-instances=0 --max-instances=3 --memory=512Mi --cpu=1
 
 FRONTEND_URL=$(gcloud run services describe frontend-streamlit --region="${REGION}" \
   --project="${PROJECT_ID}" --format="value(status.url)")
@@ -417,14 +494,23 @@ kubectl create configmap stock-agent-config \
 echo "  ✅ ConfigMap ready"
 
 # K8s Secret from Secret Manager values
-# Teaching note: gemini_api_key is included so GKE pods can use google_ai_studio
-# LLM provider (LLM_PROVIDER=google_ai_studio in deployment.yaml). This avoids
-# the CrewAI + ChatVertexAI incompatibility — CrewAI's LiteLLM layer needs a
-# model string, not a langchain object.
+# Teaching note: deployment.yaml runs LLM_PROVIDER=vertex_ai unconditionally
+# (Workload Identity via the agent-runtime GCP service account, no API key —
+# see the note in deployment.yaml), so gemini_api_key isn't consumed by the
+# pod spec even when a Gemini key was provided; it's kept here only as a
+# harmless leftover in case something else wants to read it later.
+# litellm_master_key backs LITELLM_MASTER_KEY in deployment.yaml — without
+# it, get_llm()'s litellm-proxy branch falls back to the hardcoded local-dev
+# default "sk-local-litellm-master", which doesn't match litellm-proxy's
+# real (randomly generated) master key and every call 401s at its auth
+# layer — same bug just fixed for the Cloud Run services above.
+LITELLM_MASTER_KEY_VAL=$(gcloud secrets versions access latest \
+  --secret="litellm-master-key" --project="$PROJECT_ID")
 kubectl create secret generic stock-agent-secrets \
   --namespace=stock-agent \
   --from-literal=internal_api_token="${INTERNAL_TOKEN}" \
   --from-literal=langfuse_secret_key="${LF_SECRET_KEY}" \
+  --from-literal=litellm_master_key="${LITELLM_MASTER_KEY_VAL}" \
   ${GEMINI_KEY_FOR_K8S:+--from-literal=gemini_api_key="${GEMINI_KEY_FOR_K8S}"} \
   --dry-run=client -o yaml | kubectl apply -f -
 echo "  ✅ K8s Secret ready"
@@ -442,6 +528,7 @@ export JOB_API_URL
 export REDIS_URL
 export LANGFUSE_URL
 export LANGFUSE_PUBLIC_KEY="${LF_PUBLIC_KEY}"
+export LITELLM_URL
 
 envsubst < "${REPO_ROOT}/infra/kubernetes/deployment.yaml" | kubectl apply -f -
 
@@ -476,6 +563,14 @@ echo ""
 echo "  Observability:"
 echo "    📊 Langfuse     : ${LANGFUSE_URL}"
 echo "       Login        : admin@example.com / ${LF_ADMIN_PASS}"
+echo "    🧭 LiteLLM Proxy: ${LITELLM_URL}"
+if [[ -z "$GEMINI_KEY_FOR_K8S" ]]; then
+  echo "       No --gemini-api-key provided — routing Vertex AI through it via"
+  echo "       litellm-proxy's own service account (no key needed), see /ui."
+else
+  echo "       Routing Gemini + Vertex AI through it (Gemini via the seeded"
+  echo "       API key, Vertex AI via litellm-proxy's own service account)."
+fi
 echo ""
 echo "  GKE workers:"
 echo "    kubectl get pods -n stock-agent"

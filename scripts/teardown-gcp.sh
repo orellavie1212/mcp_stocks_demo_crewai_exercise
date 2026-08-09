@@ -98,7 +98,7 @@ echo "Starting teardown..."
 echo ""
 echo "🗑️  Step 1: Deleting Cloud Run services (async, no existence check)..."
 
-for SVC in mcp-server job-api agent-runtime frontend-streamlit langfuse; do
+for SVC in mcp-server job-api agent-runtime frontend-streamlit langfuse litellm-proxy; do
   gcloud run services delete "$SVC" \
     --region="$REGION" --project="$PROJECT_ID" \
     --quiet --async 2>/dev/null \
@@ -134,15 +134,33 @@ for i in $(seq 1 18); do
 done
 
 echo "  Cleaning orphaned Direct-VPC-Egress addresses in $REGION..."
+# Teaching note: these addresses are held by a serverless.googleapis.com
+# "address reservation" tied to Cloud Run's Direct VPC Egress — not by any
+# Compute resource. That reservation is released automatically once every
+# revision that used it is gone, but asynchronously on Google's backend;
+# observed lag has been several minutes, well past when the Cloud Run
+# service itself already shows deleted. A short retry loop can't force it
+# faster (gcloud compute addresses delete isn't the API that owns the
+# reservation) — so this waits considerably longer than a first attempt
+# would suggest is needed, rather than handing the subnet destroy failure
+# back to whoever's running this.
 ORPHANS=$(gcloud compute addresses list --project="$PROJECT_ID" \
   --filter="name ~ ^serverless-ipv4 AND region:$REGION" \
   --format="value(name)" 2>/dev/null || true)
 if [[ -n "$ORPHANS" ]]; then
   while IFS= read -r addr; do
-    gcloud compute addresses delete "$addr" \
-      --region="$REGION" --project="$PROJECT_ID" --quiet 2>/dev/null \
-      && echo "    ✅ deleted: $addr" \
-      || echo "    ⏭️  could not delete (may already be gone): $addr"
+    deleted=false
+    for attempt in $(seq 1 15); do
+      if gcloud compute addresses delete "$addr" \
+          --region="$REGION" --project="$PROJECT_ID" --quiet 2>/dev/null; then
+        echo "    ✅ deleted: $addr"
+        deleted=true
+        break
+      fi
+      echo "    ⏳ still held by a serverless address reservation, retrying (${attempt}/15, 30s apart): $addr"
+      sleep 30
+    done
+    [[ "$deleted" == "true" ]] || echo "    ⚠️  could not delete after ~7.5min of retries: $addr — wait a bit longer and re-run 'make teardown'"
   done <<< "$ORPHANS"
 else
   echo "  ⏭️  No serverless-ipv4 addresses found"
@@ -169,7 +187,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "🗑️  Step 3: Deleting Artifact Registry images (no list check)..."
-for SVC in mcp-server job-api agent-runtime frontend-streamlit; do
+for SVC in mcp-server job-api agent-runtime frontend-streamlit litellm-proxy; do
   IMG="${AR_HOST}/${PROJECT_ID}/stock-agent/${SVC}"
   gcloud artifacts docker images delete "$IMG" \
     --project="$PROJECT_ID" --quiet --delete-tags 2>/dev/null \

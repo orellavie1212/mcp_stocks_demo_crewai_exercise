@@ -117,7 +117,7 @@ def main():
     st.markdown('<h1 class="main-header">🤖 CrewAI + MCP Stocks Analysis</h1>', unsafe_allow_html=True)
     st.markdown("**Comprehensive stock analysis using specialized AI agents**")
     
-    st.info("💡 **Quick Start:** 1) Start MCP Server (sidebar) → 2) Enter Gemini API Key → 3) Enter stock symbol → 4) Click Start Analysis")
+    st.info("💡 **Quick Start:** 1) Start MCP Server (sidebar) → 2) Pick an LLM provider and enter its API key → 3) Enter stock symbol → 4) Click Start Analysis")
     
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -139,23 +139,40 @@ def main():
         
         st.subheader("🤖 LLM Provider")
         env_provider = os.environ.get("LLM_PROVIDER", "google_ai_studio")
-        provider_options = ["Google AI Studio (API Key)", "Vertex AI (Google ADC)"]
-        default_index = 1 if env_provider == "vertex_ai" else 0
-        
+        provider_options = ["Google AI Studio (API Key)", "Vertex AI (Google ADC)", "OpenAI (API Key)"]
+        default_index = {"vertex_ai": 1, "openai": 2}.get(env_provider, 0)
+
         selected_provider = st.selectbox(
             "Select LLM Provider",
             options=provider_options,
             index=default_index,
             help="Choose 'Vertex AI' to use Application Default Credentials (ADC) without an API key."
         )
-        
-        llm_provider = "vertex_ai" if selected_provider == "Vertex AI (Google ADC)" else "google_ai_studio"
+
+        llm_provider = {
+            "Vertex AI (Google ADC)": "vertex_ai",
+            "OpenAI (API Key)": "openai",
+        }.get(selected_provider, "google_ai_studio")
         os.environ["LLM_PROVIDER"] = llm_provider
         is_vertex_ai = llm_provider == "vertex_ai"
-        
+        is_openai = llm_provider == "openai"
+
+        gemini_api_key = ""
+        openai_api_key = ""
         if is_vertex_ai:
             st.success("✅ Using Vertex AI (Google ADC)")
-            gemini_api_key = ""
+        elif is_openai:
+            openai_api_key = st.text_input(
+                "Enter your OpenAI API Key",
+                value=st.session_state.get("openai_api_key", ""),
+                type="password",
+                help="Get a key at https://platform.openai.com/api-keys"
+            )
+            if openai_api_key:
+                st.session_state["openai_api_key"] = openai_api_key
+                st.success("✅ API Key Set")
+            else:
+                st.warning("⚠️ API Key Required")
         else:
             gemini_api_key = st.text_input(
                 "Enter your Gemini API Key",
@@ -168,13 +185,15 @@ def main():
                 st.success("✅ API Key Set")
             else:
                 st.warning("⚠️ API Key Required")
-        
-    
+
+
     if not CREWAI_AVAILABLE:
         st.error("CrewAI is not installed. Please install it using the command in the sidebar.")
         return
-    
-    if not is_vertex_ai and not gemini_api_key:
+
+    if is_openai and not openai_api_key:
+        st.warning("Please enter your OpenAI API key in the sidebar to run analysis.")
+    elif not is_vertex_ai and not is_openai and not gemini_api_key:
         st.warning("Please enter your Gemini API key in the sidebar to enable LLM explanations.")
     
     st.header("📊 Stock Selection")
@@ -273,7 +292,7 @@ def main():
                 del st.session_state[key]
         st.rerun()
     
-    has_credentials = is_vertex_ai or bool(gemini_api_key)
+    has_credentials = is_vertex_ai or bool(gemini_api_key) or (is_openai and bool(openai_api_key))
     if run_analysis and symbol and has_credentials and not st.session_state.get("analysis_running", False):
         st.session_state["analysis_running"] = True
         
@@ -303,7 +322,10 @@ def main():
             
         
         try:
-            result = run_crewai_analysis(symbol, gemini_api_key, update_progress, verbose_callback)
+            result = run_crewai_analysis(
+                symbol, gemini_api_key, update_progress, verbose_callback,
+                provider=llm_provider, api_key=openai_api_key,
+            )
             
             st.session_state["analysis_result"] = result
             st.session_state["analysis_running"] = False

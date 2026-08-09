@@ -17,7 +17,9 @@ from __future__ import annotations
 import re
 import time
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from grounding import check_report as _check_grounding
 
 logger = logging.getLogger(__name__)
 
@@ -329,14 +331,25 @@ class OutputGuardrails:
         add_disclaimer: bool = True,
         flag_predictions: bool = True,
         redact_secrets: bool = True,
+        check_grounding: bool = True,
     ):
         self.add_disclaimer = add_disclaimer
         self.flag_predictions = flag_predictions
         self.redact_secrets = redact_secrets
+        self.check_grounding = check_grounding
 
-    def check(self, output: str) -> Tuple[str, List[GuardrailResult]]:
+    def check(
+        self, output: str, evidence: Iterable[str] = ()
+    ) -> Tuple[str, List[GuardrailResult]]:
         """
         Check and potentially modify the output.
+
+        `evidence` is the full, untruncated output of every tool call made
+        during the run (see shared-observability's ToolTracer.evidence). When
+        provided, a fourth check verifies every numeric figure in the output
+        traces back to something a tool actually returned — an evidence-
+        grounding check, informational like flag_predictions, not blocking.
+
         Returns (modified_output, list of guardrail results).
         """
         results = []
@@ -350,6 +363,9 @@ class OutputGuardrails:
         if self.flag_predictions:
             prediction_result = self._check_predictions(text)
             results.append(prediction_result)
+
+        if self.check_grounding and evidence:
+            results.append(self._check_grounding_evidence(text, evidence))
 
         if self.add_disclaimer:
             text = self._add_disclaimer(text)
@@ -387,6 +403,37 @@ class OutputGuardrails:
                 ),
             )
         return GuardrailResult(allowed=True, check_name="prediction_flag")
+
+    def _check_grounding_evidence(
+        self, text: str, evidence: Iterable[str]
+    ) -> GuardrailResult:
+        """Does every figure in the output trace back to real tool output?
+
+        Delegates to grounding.check_report — see that module's docstring for
+        the tolerance/heuristic design. Reports (never blocks): a report is
+        still shown to the user with this check's findings attached, same as
+        the prediction_flag check above.
+        """
+        result = _check_grounding(text, evidence)
+        if not result["passed"]:
+            reason = (
+                f"{len(result['ungrounded_figures'])} figure(s) not traced to tool "
+                f"output: {result['ungrounded_figures'][:5]}"
+            )
+            if result["advice_phrases"]:
+                phrases = [hit["phrase"] for hit in result["advice_phrases"]]
+                reason += f"; advice-shaped phrase(s) detected: {phrases[:3]}"
+        else:
+            reason = (
+                f"{result['figures_checked']} figure(s) checked, "
+                "all traced to tool output."
+            )
+        return GuardrailResult(
+            allowed=True,
+            check_name="grounding",
+            reason=reason,
+            modified_input=None,
+        )
 
     def _add_disclaimer(self, text: str) -> str:
         if FINANCIAL_DISCLAIMER.strip() not in text:
@@ -432,8 +479,10 @@ class GuardrailPipeline:
     ) -> GuardrailResult:
         return self.tool_layer.check_tool_call(tool_name, arguments)
 
-    def check_output(self, output: str) -> Tuple[str, List[GuardrailResult]]:
-        return self.output_layer.check(output)
+    def check_output(
+        self, output: str, evidence: Iterable[str] = ()
+    ) -> Tuple[str, List[GuardrailResult]]:
+        return self.output_layer.check(output, evidence=evidence)
 
     def reset(self):
         """Reset for a new job (clears tool call counter)."""
