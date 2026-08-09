@@ -53,6 +53,7 @@ from models import (
     AnalysisRequest, JobRecord, JobStatus, JobStatusResponse, PubSubMessage
 )
 from guardrails import InputGuardrails
+from providers import PROVIDERS, UnknownProvider, configured_providers, get_provider
 
 settings = get_settings()
 setup_logging("job-api", settings.log_level, settings.log_format)
@@ -333,6 +334,16 @@ class SubmitRequest(BaseModel):
     symbols: list = Field(default_factory=list)
     user_id: str = Field(default="anonymous")
     idempotency_key: Optional[str] = None
+    provider: Optional[str] = Field(
+        default=None,
+        description="Model vendor for this run: 'openai', 'google_ai_studio', "
+                    "or 'vertex_ai'. Omitted, follows agent-runtime's LLM_PROVIDER.",
+    )
+    api_key: str = Field(
+        default="",
+        description="Overrides the chosen provider's key for this run only. "
+                    "Never stored — see GET /providers for what's configured.",
+    )
 
 
 class JobSubmitResponse(BaseModel):
@@ -390,6 +401,30 @@ async def ready():
     return {"status": "ready"}
 
 
+@app.get("/providers")
+async def route_providers():
+    """Which model vendors this build knows, and which have a key right now.
+
+    `configured` is read from the environment at request time, so the
+    frontend can say "OpenAI is ready / Gemini is not" without spending a
+    token to find out — same idea as the /providers route zvi's upstream
+    stocks_crew.api adds for its single-provider-per-run switcher.
+    """
+    ready_now = configured_providers()
+    return {
+        "providers": [
+            {
+                "name": p.name,
+                "label": p.label,
+                "api_key_env": p.api_key_env,
+                "configured": p.name in ready_now,
+            }
+            for p in PROVIDERS.values()
+        ],
+        "default": settings.llm_provider,
+    }
+
+
 @app.post("/jobs", response_model=JobSubmitResponse, status_code=202)
 async def submit_job(body: SubmitRequest):
     """
@@ -404,6 +439,15 @@ async def submit_job(body: SubmitRequest):
       202 is correct for async jobs.
     """
     trace_id = get_trace_id()
+
+    if body.provider:
+        try:
+            get_provider(body.provider)
+        except UnknownProvider as e:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": UnknownProvider.error_code, "message": str(e)},
+            )
 
     if body.idempotency_key:
         existing_id = await find_existing_job(body.idempotency_key)
@@ -453,13 +497,14 @@ async def submit_job(body: SubmitRequest):
         symbols=body.symbols,
         user_id=body.user_id,
         idempotency_key=body.idempotency_key,
+        provider=body.provider,
     )
     job = JobRecord(
         request=analysis_request,
         status=JobStatus.PENDING,
     )
 
-    log.info("Job created", job_id=job.job_id, query=body.query[:80])
+    log.info("Job created", job_id=job.job_id, query=body.query[:80], provider=body.provider)
 
     await save_job(job)
 
@@ -467,6 +512,7 @@ async def submit_job(body: SubmitRequest):
         job_id=job.job_id,
         request=analysis_request,
         trace_id=trace_id,
+        api_key=body.api_key,
     )
     await publish_job(message)
 

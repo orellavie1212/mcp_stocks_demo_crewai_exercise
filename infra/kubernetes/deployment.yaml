@@ -108,18 +108,30 @@ spec:
               value: "production"
             - name: LOG_FORMAT
               value: "json"
-            # Teaching note: google_ai_studio uses the Gemini API key (injected from
-            # K8s secret below). vertex_ai would need Workload Identity + langchain-
-            # google-vertexai, but newer CrewAI wraps LLMs via LiteLLM and doesn't
-            # understand ChatVertexAI objects — leading to "unknown object type" errors.
-            # google_ai_studio + GEMINI_API_KEY is simpler and equally capable.
+            # vertex_ai, no key: get_llm() (packages/shared-config/config.py)
+            # returns crewai's own LLM class here, not a raw ChatVertexAI
+            # langchain object — CrewAI's Agent(llm=...) validation is fine
+            # with that. Same LLM_PROVIDER Cloud Run's mcp-server/agent-runtime
+            # deploys use; Workload Identity (this pod's GCP service account)
+            # authenticates automatically, matching setup-gcp.sh's Cloud Run
+            # deploys — no API key anywhere in this manifest.
             - name: LLM_PROVIDER
-              value: "google_ai_studio"
-            - name: GEMINI_API_KEY
+              value: "vertex_ai"
+            # LiteLLM proxy — same routing every other service gets
+            # unconditionally (see setup-gcp.sh's LITELLM_ENV_VAR). Vertex AI
+            # itself authenticates via litellm-proxy's own service account,
+            # not this pod's — but LITELLM_MASTER_KEY is still required: it's
+            # how this pod authenticates *to the proxy itself* (litellm's own
+            # auth layer, separate from the Vertex AI credential question).
+            # Without it, get_llm() falls back to a hardcoded local-dev
+            # default that doesn't match the real key and every call 401s.
+            - name: LITELLM_BASE_URL
+              value: "${LITELLM_URL}"
+            - name: LITELLM_MASTER_KEY
               valueFrom:
                 secretKeyRef:
                   name: stock-agent-secrets
-                  key: gemini_api_key
+                  key: litellm_master_key
             - name: GCP_PROJECT
               valueFrom:
                 configMapKeyRef:

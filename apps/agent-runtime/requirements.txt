@@ -15,16 +15,29 @@ litellm>=1.0.0
 langchain==1.2.12
 langchain-core==1.2.18
 
+# Real MCP client (Streamable HTTP) — agent-runtime's MCPClient talks real
+# MCP JSON-RPC to mcp-server's /mcp sub-app instead of plain REST.
+# Capped <2.0: mcp 2.0.0 removed mcp.client.streamable_http entirely — see
+# the matching note in apps/mcp-server/requirements.txt (verified by an
+# actual failed container build, not a hypothetical).
+mcp>=1.9,<2.0
+
 # Gemini LLM
 langchain-google-genai==4.2.1  # Google AI Studio (local dev)
 langchain-google-vertexai>=1.0 # Vertex AI (production, Workload Identity)
+
+# OpenAI LLM
+langchain-openai>=0.2
 
 # GCP clients
 google-cloud-pubsub>=2.21
 google-cloud-firestore>=2.16
 
 # Redis (caching + rate limiting)
-redis[asyncio]>=5.0
+# No "asyncio" extra: redis-py folded asyncio support into the base package
+# years ago, so recent versions don't define that extra (uv/pip warn if you
+# ask for it) — redis.asyncio still works fine without it.
+redis>=5.0
 
 # Langfuse (LLM observability)
 # Pin to v2.x: Langfuse SDK v3+ uses the OpenTelemetry endpoint

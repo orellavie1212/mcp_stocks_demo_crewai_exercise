@@ -100,15 +100,15 @@ resource "google_artifact_registry_repository" "stock_agent" {
 # ---------------------------------------------------------------------------
 
 resource "google_pubsub_topic" "analysis_requests" {
-  name = "analysis-requests"
-  message_retention_duration = "86600s"  # 24h
-  depends_on = [google_project_service.apis]
+  name                       = "analysis-requests"
+  message_retention_duration = "86600s" # 24h
+  depends_on                 = [google_project_service.apis]
 }
 
 resource "google_pubsub_topic" "analysis_dlq" {
-  name = "analysis-dlq"  # Dead letter queue for failed messages
-  message_retention_duration = "604800s"  # 7 days — inspect failed jobs
-  depends_on = [google_project_service.apis]
+  name                       = "analysis-dlq" # Dead letter queue for failed messages
+  message_retention_duration = "604800s"      # 7 days — inspect failed jobs
+  depends_on                 = [google_project_service.apis]
 }
 
 resource "google_pubsub_subscription" "agent_worker" {
@@ -163,12 +163,12 @@ resource "google_firestore_database" "default" {
 # ---------------------------------------------------------------------------
 
 resource "google_redis_instance" "cache" {
-  name               = "stock-agent-cache"
-  tier               = "BASIC"   # No replicas for demo (use STANDARD_HA for production)
-  memory_size_gb     = 1
-  region             = var.region
-  redis_version      = "REDIS_7_0"
-  display_name       = "Stock Agent Cache"
+  name           = "stock-agent-cache"
+  tier           = "BASIC" # No replicas for demo (use STANDARD_HA for production)
+  memory_size_gb = 1
+  region         = var.region
+  redis_version  = "REDIS_7_0"
+  display_name   = "Stock Agent Cache"
   # Teaching note: authorized_network MUST match the VPC used by GKE and Cloud Run.
   # Without this it defaults to the GCP "default" VPC — a different network than
   # stock-agent-vpc, so Cloud Run (with Direct VPC Egress) and GKE pods both fail
@@ -190,13 +190,13 @@ resource "random_id" "sql_instance_suffix" {
 }
 
 resource "google_sql_database_instance" "langfuse" {
-  name             = "langfuse-db-${random_id.sql_instance_suffix.hex}"
-  database_version = "POSTGRES_16"
-  region           = var.region
-  deletion_protection = false  # Set to true in real production
+  name                = "langfuse-db-${random_id.sql_instance_suffix.hex}"
+  database_version    = "POSTGRES_16"
+  region              = var.region
+  deletion_protection = false # Set to true in real production
 
   settings {
-    tier = "db-f1-micro"  # Cheapest tier — sufficient for demo
+    tier      = "db-f1-micro" # Cheapest tier — sufficient for demo
     disk_size = 10
 
     backup_configuration {
@@ -205,7 +205,7 @@ resource "google_sql_database_instance" "langfuse" {
 
     ip_configuration {
       # Public IP — acceptable for demo; use private IP + Service Networking in production
-      ipv4_enabled    = true
+      ipv4_enabled = true
     }
   }
   lifecycle {
@@ -236,6 +236,30 @@ resource "google_sql_user" "langfuse" {
 }
 
 resource "random_password" "langfuse_db" {
+  length  = 32
+  special = false
+}
+
+# LiteLLM's own database + user, on this SAME Cloud SQL instance rather than
+# a second instance — mirrors the local Docker Compose setup, where litellm's
+# admin UI (spend/usage dashboard) shares one Postgres with Langfuse rather
+# than getting its own container. Backs litellm-proxy's /ui only — routing,
+# budget/parallel-request limits, and the Langfuse callback all work without
+# any database, same as locally.
+resource "google_sql_database" "litellm" {
+  name            = "litellm"
+  instance        = google_sql_database_instance.langfuse.name
+  deletion_policy = "ABANDON" # instance deletion cascades, see langfuse note above
+}
+
+resource "google_sql_user" "litellm" {
+  name            = "litellm"
+  instance        = google_sql_database_instance.langfuse.name
+  password        = random_password.litellm_db.result
+  deletion_policy = "ABANDON"
+}
+
+resource "random_password" "litellm_db" {
   length  = 32
   special = false
 }
@@ -278,8 +302,8 @@ resource "google_container_cluster" "agent_cluster" {
   location = var.region
 
   # Autopilot mode — Google manages all nodes
-  enable_autopilot     = true
-  deletion_protection  = false  # Allow terraform destroy
+  enable_autopilot    = true
+  deletion_protection = false # Allow terraform destroy
 
   network    = google_compute_network.vpc.name
   subnetwork = google_compute_subnetwork.subnet.name
@@ -333,6 +357,44 @@ resource "google_service_account" "langfuse" {
   description  = "Langfuse LLM observability service — Cloud Run backed by Cloud SQL"
 }
 
+# LiteLLM Proxy service account — needs Vertex AI access so its vertex-*
+# model_list entries (docker/litellm/config.yaml) can authenticate the same
+# way agent-runtime/mcp-server do when calling Vertex AI directly: an
+# attached IAM service account, no key material anywhere. Deployed without
+# --service-account=, Cloud Run would fall back to the project's default
+# compute service account, which this Terraform config never grants
+# aiplatform.user — the vertex-* routes would 403 silently until someone
+# tracked down which identity was actually being used.
+resource "google_service_account" "litellm_proxy" {
+  account_id   = "litellm-proxy"
+  display_name = "LiteLLM Proxy"
+  description  = "LiteLLM Proxy — routes LLM calls (incl. Vertex AI), traces to Langfuse"
+}
+
+resource "google_project_iam_member" "litellm_vertex_ai" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.litellm_proxy.email}"
+}
+
+# Also needs Secret Manager access: setup-gcp.sh deploys it with
+# --set-secrets for LITELLM_MASTER_KEY (and GEMINI_API_KEY when provided),
+# which Cloud Run resolves via this service account at deploy time — same
+# requirement job_api/agent_runtime already have below for their own secrets.
+resource "google_project_iam_member" "litellm_secret_accessor" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.litellm_proxy.email}"
+}
+
+# Cloud SQL Proxy connector access — same requirement langfuse_cloudsql below
+# has, needed for --add-cloudsql-instances (litellm-db-url's Unix socket).
+resource "google_project_iam_member" "litellm_cloudsql" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.litellm_proxy.email}"
+}
+
 resource "google_project_iam_member" "langfuse_cloudsql" {
   project = var.project_id
   role    = "roles/cloudsql.client"
@@ -345,10 +407,17 @@ resource "google_project_iam_member" "langfuse_secret_accessor" {
   member  = "serviceAccount:${google_service_account.langfuse.email}"
 }
 
-# MCP Server IAM: only needs Vertex AI access
+# MCP Server IAM: Vertex AI + Secret Manager (LITELLM_MASTER_KEY, now that
+# mcp-server's Cloud Run deploy uses --set-secrets for the first time)
 resource "google_project_iam_member" "mcp_vertex_ai" {
   project = var.project_id
   role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.mcp_server.email}"
+}
+
+resource "google_project_iam_member" "mcp_secret_accessor" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${google_service_account.mcp_server.email}"
 }
 
@@ -423,17 +492,17 @@ resource "google_service_account_iam_member" "workload_identity_agent" {
 # GKE Autopilot nodes use the default compute SA to pull images from Artifact Registry.
 # Without this, pods get ErrImagePull even though the image exists in AR.
 resource "google_project_iam_member" "gke_node_ar_reader" {
-  project = var.project_id
-  role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+  project    = var.project_id
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
   depends_on = [google_project_service.apis]
 }
 
 # Also allow Pub/Sub to deliver dead-letter messages (needed for DLQ policy)
 resource "google_project_iam_member" "pubsub_sa_token_creator" {
-  project = var.project_id
-  role    = "roles/iam.serviceAccountTokenCreator"
-  member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+  project    = var.project_id
+  role       = "roles/iam.serviceAccountTokenCreator"
+  member     = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
   depends_on = [google_project_service.apis]
 }
 
@@ -488,6 +557,16 @@ resource "google_secret_manager_secret" "langfuse_public_key" {
 
 resource "google_secret_manager_secret" "langfuse_db_url" {
   secret_id = "langfuse-db-url"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
+
+# litellm-db-url: same idea as langfuse-db-url above, built by setup-gcp.sh
+# from google_sql_user.litellm's password + this instance's connection name.
+resource "google_secret_manager_secret" "litellm_db_url" {
+  secret_id = "litellm-db-url"
   replication {
     auto {}
   }
@@ -568,6 +647,12 @@ output "langfuse_db_connection_name" {
 output "langfuse_db_password" {
   description = "Auto-generated Langfuse DB password — read by setup-gcp.sh to build DATABASE_URL"
   value       = random_password.langfuse_db.result
+  sensitive   = true
+}
+
+output "litellm_db_password" {
+  description = "Auto-generated LiteLLM DB password — read by setup-gcp.sh to build DATABASE_URL. Same Cloud SQL instance/connection name as Langfuse (langfuse_db_connection_name), different database."
+  value       = random_password.litellm_db.result
   sensitive   = true
 }
 

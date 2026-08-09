@@ -452,7 +452,7 @@ make logs
 | 🖥️ Streamlit UI | `http://localhost:8501` |
 | 📋 Job API docs | `http://localhost:8000/docs` |
 | 🔧 MCP Server docs | `http://localhost:8001/docs` |
-| 🔍 Langfuse UI | `http://localhost:3000` (admin@localhost / admin123) |
+| 🔍 Langfuse UI | `http://localhost:3000` (admin@example.com / admin123) |
 
 **Cleanup:** `make down` (keeps volumes) or `make clean` (removes everything)
 
@@ -503,8 +503,9 @@ Langfuse :3000 ← all LLM traces, token counts, costs
 | `redis` | 6379 | Cache + rate limiting |
 | `pubsub-emulator` | 8085 | GCP Pub/Sub locally |
 | `pubsub-init` | — | Creates topics (runs once) |
-| `langfuse-postgres` | — | Langfuse's database |
+| `postgres` | — | Shared DB: Langfuse + LiteLLM's admin UI |
 | `langfuse` | 3000 | LLM observability UI |
+| `litellm-proxy` | 4010 | Routes every LLM call, traces to Langfuse |
 | `mcp-server` | 8001 | Stock data tools |
 | `job-api` | 8000 | Async job gateway |
 | `agent-runtime` | 8002 | CrewAI workers |

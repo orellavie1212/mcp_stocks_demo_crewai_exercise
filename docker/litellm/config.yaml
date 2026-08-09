@@ -1,0 +1,103 @@
+# LiteLLM proxy config — baked into the image at build time (see Dockerfile).
+# Shared by both Lab 3 (Docker Compose) and Lab 4 (Cloud Run) — same image,
+# same config; only the litellm-proxy container's own environment differs
+# between them (see the two places GCP_PROJECT/VERTEX_LOCATION are set:
+# docker/docker-compose.yml for Lab 3, scripts/setup-gcp.sh for Lab 4).
+#
+# Teaching note:
+#   model_name here is the bare model name packages/shared-config/config.py's
+#   get_model(tier) returns (e.g. "gemini-3.5-flash", "gpt-4o-mini"), prefixed
+#   with "vertex-" for the vertex_ai entries — get_llm() picks which one to
+#   ask for based on the effective provider (see its litellm_base_url branch).
+#   Callers route through this proxy via CrewAI's LLM(model=f"openai/{name}",
+#   base_url=LITELLM_BASE_URL) — litellm's proxy always exposes an
+#   OpenAI-compatible /chat/completions endpoint, so from the caller's side
+#   every provider looks like "openai" pointed at a custom base_url; the
+#   *litellm_params.model* below (with its real "gemini/"/"vertex_ai/"/"openai/"
+#   prefix) is what actually picks the backend.
+#
+#   The vertex-* entries carry no api_key: litellm's vertex_ai integration
+#   falls back to Application Default Credentials (google.auth.default())
+#   when none is given — a service-account file at GOOGLE_APPLICATION_CREDENTIALS
+#   in Lab 3 (mounted from the host's `gcloud auth application-default login`
+#   session), or the Cloud Run service's attached IAM service account in Lab 4
+#   (roles/aiplatform.user — see infra/terraform/main.tf's litellm SA). Same
+#   "no API key in the container" property Workload Identity gives
+#   agent-runtime/mcp-server's direct (non-proxy) Vertex AI calls; routing it
+#   through litellm-proxy on top adds native Langfuse tracing + the budget/
+#   parallel-request caps below to those calls too.
+environment_variables:
+  NO_DOCS: true
+  NO_REDOC: true
+
+model_list:
+  - model_name: vertex-gemini-3.1-flash-lite
+    litellm_params:
+      model: vertex_ai/gemini-3.1-flash-lite
+      vertex_project: os.environ/GCP_PROJECT
+      vertex_location: os.environ/VERTEX_LOCATION
+      request_timeout: 120
+  - model_name: vertex-gemini-3.5-flash
+    litellm_params:
+      model: vertex_ai/gemini-3.5-flash
+      vertex_project: os.environ/GCP_PROJECT
+      vertex_location: os.environ/VERTEX_LOCATION
+      request_timeout: 120
+  - model_name: vertex-gemini-3.1-pro-preview
+    litellm_params:
+      model: vertex_ai/gemini-3.1-pro-preview
+      vertex_project: os.environ/GCP_PROJECT
+      vertex_location: os.environ/VERTEX_LOCATION
+      request_timeout: 120
+  - model_name: gemini-3.1-flash-lite
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+      request_timeout: 120
+  - model_name: gemini-3.5-flash
+    litellm_params:
+      model: gemini/gemini-3.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+      request_timeout: 120
+  - model_name: gemini-3.1-pro-preview
+    litellm_params:
+      model: gemini/gemini-3.1-pro-preview
+      api_key: os.environ/GEMINI_API_KEY
+      request_timeout: 120
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+      request_timeout: 120
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      request_timeout: 120
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Basic request-blocking settings for the lab: a budget cap the proxy
+  # enforces itself (no Postgres/Redis-backed team/session budgets — this is
+  # the teaching-scale version, not the production one) plus parallel-request
+  # caps so one runaway agent can't starve the others.
+  max_budget: 5.0
+  budget_duration: 1d
+  max_parallel_requests: 20
+  max_request_size_mb: 20
+  max_response_size_mb: 40
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  request_timeout: 120
+  # Native Langfuse integration — litellm posts every call's trace to the
+  # existing self-hosted Langfuse service via LANGFUSE_HOST/PUBLIC_KEY/
+  # SECRET_KEY (set as env vars on the litellm-proxy container in
+  # docker-compose.yml). No app code needed on either side.
+  success_callback: ["langfuse"]
+
+router_settings:
+  num_retries: 1
+  timeout: 120
+  allowed_fails: 2

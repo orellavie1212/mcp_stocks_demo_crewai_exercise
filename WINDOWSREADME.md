@@ -51,6 +51,11 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
 sudo apt update
 sudo apt install -y terraform google-cloud-cli \
                     google-cloud-cli-gke-gcloud-auth-plugin kubectl
+
+# uv (fast Python package installer — same static binary on WSL2 Ubuntu,
+# native macOS, and native Ubuntu, so Section 3 below is identical everywhere)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
 ```
 
 ---
@@ -86,7 +91,21 @@ The **linux** conda/venv inside the WSL distro is what matters here. A Windows-i
 Anaconda/Miniconda cannot be used from WSL — install conda *inside* Ubuntu if you want
 to use it.
 
-### Option A — conda (recommended if you already use conda)
+### Option A — venv + uv (recommended, fastest)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+make dev-install    # uv-installs requirements.txt + every apps/*/requirements.txt
+```
+
+`make dev-install` is the same command the devcontainer runs, so this is the identical
+path Codespaces/VS Code devcontainer users get — see `Makefile`'s `dev-install` target
+if you want to see exactly what it installs, or to install a single app's deps with
+`uv pip install -r apps/<service>/requirements.txt` directly.
+
+Each new WSL tab: `cd ~/mcp_stocks_demo_crewai_exercise && source .venv/bin/activate`.
+
+### Option B — conda
 
 One-time install of linux Miniforge inside WSL:
 
@@ -98,32 +117,15 @@ bash /tmp/miniforge.sh -b -p "$HOME/miniforge3"
 exec bash
 ```
 
-Create the project env and install deps:
+Create the project env and install deps (uv works fine inside an activated conda env too):
 
 ```bash
 conda create -n stock-agent python=3.11 -y
 conda activate stock-agent
-pip install -r requirements.txt \
-            -r apps/mcp-server/requirements.txt \
-            -r apps/job-api/requirements.txt \
-            -r apps/agent-runtime/requirements.txt \
-            -r apps/frontend-streamlit/requirements.txt
+make dev-install
 ```
 
 Each new WSL tab: `cd ~/mcp_stocks_demo_crewai_exercise && conda activate stock-agent`.
-
-### Option B — venv (stdlib, no extra install)
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt \
-            -r apps/mcp-server/requirements.txt \
-            -r apps/job-api/requirements.txt \
-            -r apps/agent-runtime/requirements.txt \
-            -r apps/frontend-streamlit/requirements.txt
-```
-
-Each new WSL tab: `cd ~/mcp_stocks_demo_crewai_exercise && source .venv/bin/activate`.
 
 ---
 

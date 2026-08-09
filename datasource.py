@@ -69,7 +69,7 @@ def search_symbols(q: str, limit: int = 12) -> List[Dict[str, Any]]:
 def latest_quote(symbol: str) -> Dict[str, Any]:
     symbol = (symbol or "").strip()
     if not symbol:
-        return {"_error": True, "_message": "symbol required"}
+        return {"error": "symbol_required", "message": "symbol required"}
 
     try:
         t = yf.Ticker(symbol)
@@ -112,7 +112,16 @@ def latest_quote(symbol: str) -> Dict[str, Any]:
             "timestamp": int(datetime.now(timezone.utc).timestamp()),
         }
     except Exception as e:
-        return {"_error": True, "_message": f"quote_failed: {e}"}
+        # "error"/"message" — same convention as search_symbols() above and
+        # every error path in apps/mcp-server/server.py. This used to be
+        # "_error"/"_message", a key nothing else in the codebase checked
+        # for, which meant callers that check `if result.get("error")`
+        # (e.g. apps/agent-runtime/worker.py's latest_quote tool wrapper)
+        # never saw the failure and fell through to formatting `None` price
+        # fields as currency, crashing with a confusing
+        # "unsupported format string passed to NoneType.__format__"
+        # instead of surfacing the real error.
+        return {"error": "quote_failed", "message": str(e)}
 
 
 def price_series(symbol: str, interval: str = "daily", lookback: int = 180) -> pd.DataFrame:

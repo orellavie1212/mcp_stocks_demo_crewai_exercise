@@ -12,7 +12,8 @@
 # =============================================================================
 
 .PHONY: help up down logs test lint build push deploy-run deploy-gke \
-        infra-up infra-down setup-gcp seed-secrets clean lab3-rebuild
+        infra-up infra-down setup-gcp seed-secrets clean lab3-rebuild \
+        _ensure-gcloud-dir
 
 # Load environment variables from .env if it exists
 -include .env
@@ -25,11 +26,30 @@ AR_REPO          ?= stock-agent
 AR_HOST          ?= $(GCP_REGION)-docker.pkg.dev
 IMAGE_PREFIX     := $(AR_HOST)/$(GCP_PROJECT)/$(AR_REPO)
 
-SERVICES     := mcp-server job-api agent-runtime frontend-streamlit langfuse
+SERVICES     := mcp-server job-api agent-runtime frontend-streamlit langfuse litellm-proxy
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+# =============================================================================
+# LOCAL DEV ENVIRONMENT SETUP (uv — WSL2/Windows, macOS, Ubuntu)
+# =============================================================================
+
+dev-install: ## Install all Python deps with uv (Lab 1 root requirements.txt + every apps/*/requirements.txt)
+	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install it: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
+	@# --system only when no venv is active (e.g. the devcontainer, which
+	@# installs to the container's system Python like the old `pip3 --user`
+	@# did) — with an activated .venv, --system would ignore it and install
+	@# into the system/conda Python instead, defeating the venv entirely.
+	@if [ -n "$$VIRTUAL_ENV" ]; then echo "Installing into active venv: $$VIRTUAL_ENV"; \
+	else echo "No active venv — installing with --system"; fi
+	uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r requirements.txt
+	@for r in apps/*/requirements.txt; do \
+	  echo "Installing $$r..."; \
+	  uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r "$$r"; \
+	done
+	@echo "✅ All Python dependencies installed via uv."
 
 # =============================================================================
 # LOCAL DEVELOPMENT
@@ -38,20 +58,30 @@ help:  ## Show this help
 # Docker Compose helper — always load .env from repo root
 DC = docker compose --env-file .env -f docker/docker-compose.yml
 
-lab3-up: ## Start full local stack (all services + Redis + Pub/Sub emulator + Langfuse)
+# litellm-proxy mounts $$HOME/.config/gcloud read-only for Vertex AI ADC
+# access (see docker-compose.yml). A bind mount fails outright if the source
+# path doesn't exist, which would break `docker compose up` entirely for
+# anyone who's never run gcloud — not just disable the Vertex AI routes it's
+# meant for. Ensuring the directory exists (empty is fine) keeps that mount
+# harmless for Google AI Studio / OpenAI users who never touch gcloud.
+_ensure-gcloud-dir:
+	@mkdir -p "$$HOME/.config/gcloud"
+
+lab3-up: _ensure-gcloud-dir ## Start full local stack (all services + Redis + Pub/Sub emulator + Langfuse + LiteLLM Proxy)
 	$(DC) up --build -d
 	@echo ""
 	@echo "✅ Stack started:"
 	@echo "  Streamlit UI  : http://localhost:8501"
 	@echo "  Job API       : http://localhost:8000/docs"
-	@echo "  MCP Server    : http://localhost:8001/docs"
+	@echo "  MCP Server    : http://localhost:8001/docs (real MCP at /mcp/)"
+	@echo "  LiteLLM Proxy : http://localhost:4010"
 	@echo "  Langfuse UI   : http://localhost:3000"
 	@echo ""
 
 lab3-down: ## Stop local stack
 	$(DC) down
 
-lab3-rebuild: ## Nuclear rebuild: drop local images, --no-cache build, restart stack (use after requirements.txt changes)
+lab3-rebuild: _ensure-gcloud-dir ## Nuclear rebuild: drop local images, --no-cache build, restart stack (use after requirements.txt changes)
 	$(DC) down --rmi local
 	$(DC) build --no-cache mcp-server job-api agent-runtime frontend-streamlit
 	$(DC) up -d
@@ -59,7 +89,8 @@ lab3-rebuild: ## Nuclear rebuild: drop local images, --no-cache build, restart s
 	@echo "✅ Stack rebuilt from scratch."
 	@echo "  Streamlit UI : http://localhost:8501"
 	@echo "  Job API      : http://localhost:8000/docs"
-	@echo "  MCP Server   : http://localhost:8001/docs"
+	@echo "  MCP Server   : http://localhost:8001/docs (real MCP at /mcp/)"
+	@echo "  LiteLLM Proxy: http://localhost:4010"
 	@echo "  Langfuse UI  : http://localhost:3000"
 
 logs: ## Tail logs from all services
@@ -109,6 +140,7 @@ lab2-ui: ## Lab 2 ➍  Streamlit frontend on :8501  (open a new terminal)
 test: ## Run all unit tests
 	cd packages/shared-models && python -m pytest ../../tests/unit/test_models/ -v
 	cd packages/shared-guardrails && python -m pytest ../../tests/unit/test_guardrails/ -v
+	cd packages/shared-config && python -m pytest ../../tests/unit/test_config/ -v
 	cd apps/mcp-server && python -m pytest ../../tests/unit/test_mcp_server/ -v
 
 test-integration: ## Run integration tests (requires running stack)
@@ -130,6 +162,8 @@ build: ## Build all Docker images
 	  echo "🔨 Building $$svc..."; \
 	  docker build -t stock-agent-$$svc:latest -f apps/$$svc/Dockerfile apps/$$svc; \
 	done
+	@echo "🔨 Building litellm-proxy..."
+	docker build -t stock-agent-litellm-proxy:latest -f docker/litellm/Dockerfile docker/litellm
 
 push: ## Push images to Artifact Registry
 	gcloud auth configure-docker $(AR_HOST) --quiet
@@ -138,6 +172,9 @@ push: ## Push images to Artifact Registry
 	  docker tag stock-agent-$$svc:latest $(IMAGE_PREFIX)/$$svc:latest; \
 	  docker push $(IMAGE_PREFIX)/$$svc:latest; \
 	done
+	@echo "📤 Pushing litellm-proxy..."
+	docker tag stock-agent-litellm-proxy:latest $(IMAGE_PREFIX)/litellm-proxy:latest
+	docker push $(IMAGE_PREFIX)/litellm-proxy:latest
 
 # =============================================================================
 # GCP INFRASTRUCTURE (TERRAFORM)
@@ -180,12 +217,14 @@ deploy-gke: push ## Deploy agent-runtime workers to GKE Autopilot (uses envsubst
 	$(eval JOB_API_URL      := $(shell gcloud run services describe job-api      --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format="value(status.url)" 2>/dev/null))
 	$(eval LANGFUSE_URL     := $(shell gcloud run services describe langfuse      --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format="value(status.url)" 2>/dev/null))
 	$(eval LANGFUSE_PK      := $(shell gcloud secrets versions access latest --secret=langfuse-public-key --project=$(GCP_PROJECT) 2>/dev/null))
+	$(eval LITELLM_URL      := $(shell gcloud run services describe litellm-proxy --region=$(GCP_REGION) --project=$(GCP_PROJECT) --format="value(status.url)" 2>/dev/null))
 	$(eval REDIS_HOST       := $(shell cd infra/terraform && terraform output -raw redis_host 2>/dev/null))
 	$(eval REDIS_PORT       := $(shell cd infra/terraform && terraform output -raw redis_port 2>/dev/null || echo "6379"))
 	GCP_PROJECT=$(GCP_PROJECT) GCP_REGION=$(GCP_REGION) \
 	  MCP_URL=$(MCP_URL) JOB_API_URL=$(JOB_API_URL) \
 	  REDIS_URL=redis://$(REDIS_HOST):$(REDIS_PORT)/0 \
 	  LANGFUSE_URL=$(LANGFUSE_URL) LANGFUSE_PUBLIC_KEY=$(LANGFUSE_PK) \
+	  LITELLM_URL=$(LITELLM_URL) \
 	  envsubst < infra/kubernetes/deployment.yaml | kubectl apply -f -
 	kubectl rollout status deployment/agent-runtime -n stock-agent --timeout=300s
 

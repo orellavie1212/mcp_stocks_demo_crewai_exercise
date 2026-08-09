@@ -9,13 +9,23 @@ numpy>=1.26
 yfinance>=0.2.50
 requests>=2.31
 python-dotenv>=1.0
-fastmcp>=0.2.5
+# Official MCP Python SDK. The code imports `mcp.server.fastmcp`, which lives
+# here — NOT in the third-party `fastmcp` package this used to pin (the code
+# always imported the official SDK's class; the third-party pin was stale and
+# unrelated to why /mcp previously served no real MCP traffic).
+# Capped <2.0: verified working at 1.26.0. mcp 2.0.0 restructured the package
+# and removed `mcp.server.fastmcp`/`mcp.client.streamable_http` entirely
+# (confirmed by actually building this image against an unpinned >=1.9, which
+# resolved to 2.0.0 and failed at import time) — a real breaking change, not
+# a hypothetical one. Revisit this pin deliberately if upgrading to 2.x.
+mcp>=1.9,<2.0
 
 # LLM (for /explain endpoint)
 # Pinned to versions verified working on macOS alongside the agent-runtime.
 langchain-core==1.2.18
 langchain-google-genai==4.2.1  # Local dev (Google AI Studio)
 langchain-google-vertexai>=1.0 # Production (Vertex AI / Workload Identity)
+langchain-openai>=0.2
 
 # Observability
 opentelemetry-sdk>=1.24

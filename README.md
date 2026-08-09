@@ -30,7 +30,9 @@ Stage 1: Local Demo          Stage 2: Containers         Stage 3: Cloud-Ready   
 One Python script            docker-compose.yml          Cloud Run (3 services)       GKE Autopilot workers
 Everything in-process        Network boundaries          Secret Manager               Pub/Sub async queue
 No observability             Redis + Pub/Sub emulator    Cloud Logging                HPA autoscaling
-OpenAI API key in .env       Langfuse (local)            Cloud Trace                  Workload Identity
+OpenAI or Gemini key in .env Langfuse (local)            Cloud Trace                  Workload Identity
+(LLM_PROVIDER switch)        LiteLLM Proxy (routing +                                 LiteLLM Proxy (opt-in)
+                              basic request limits)
                                                          Firestore                    Langfuse (cloud)
 ```
 
@@ -40,7 +42,9 @@ OpenAI API key in .env       Langfuse (local)            Cloud Trace            
 
 ### Prerequisites
 - Docker Desktop
-- A free [Google AI Studio](https://aistudio.google.com/apikey) API key
+- A free [Google AI Studio](https://aistudio.google.com/apikey) API key, or an
+  [OpenAI](https://platform.openai.com/api-keys) API key — either works, set via
+  `LLM_PROVIDER` in `.env`
 
 ```bash
 # 1. Clone
@@ -50,9 +54,10 @@ cd mcp_stocks_demo_crewai_exercise
 # 2. Configure
 cp .env.example .env
 # Edit .env: set GEMINI_API_KEY=your-key-here
+# (or LLM_PROVIDER=openai and OPENAI_API_KEY=your-key-here)
 
 # 3. Start everything
-make up
+make lab3-up
 
 # 4. Open the UI
 open http://localhost:8501
@@ -63,12 +68,13 @@ open http://localhost:8501
 |---|---|---|
 | Streamlit UI | http://localhost:8501 | User-facing app |
 | Job API | http://localhost:8000/docs | Async job gateway |
-| MCP Server | http://localhost:8001/docs | Tool/data server |
+| MCP Server | http://localhost:8001/docs | Tool/data server (real MCP at `/mcp/`) |
+| LiteLLM Proxy | http://localhost:4010 | Routes every LLM call, traces to Langfuse |
 | Langfuse | http://localhost:3000 | LLM call traces |
 | Redis | localhost:6379 | Cache + rate limiting |
 | Pub/Sub emulator | localhost:8085 | Async message queue |
 
-**Langfuse login:** `admin@localhost` / `admin123`
+**Langfuse login:** `admin@example.com` / `admin123`
 
 ---
 
