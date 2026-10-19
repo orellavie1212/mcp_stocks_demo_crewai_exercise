@@ -94,6 +94,13 @@ def get_provider(name: Optional[str]) -> Provider:
         ) from None
 
 
+def _is_real_key(value: Optional[str]) -> bool:
+    """False for empty values and the placeholders .env.example ships with
+    ("your-gemini-api-key-here"), which are not credentials."""
+    v = (value or "").strip().lower()
+    return bool(v) and not v.startswith("your-") and not v.endswith("-here")
+
+
 def configured_providers() -> List[str]:
     """Providers with a key/credential available right now.
 
@@ -104,5 +111,5 @@ def configured_providers() -> List[str]:
     return [
         p.name
         for p in PROVIDERS.values()
-        if not p.api_key_env or (os.getenv(p.api_key_env) or "").strip()
+        if not p.api_key_env or _is_real_key(os.getenv(p.api_key_env))
     ]

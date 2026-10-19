@@ -119,18 +119,20 @@ lab1-api: ## Lab 1  Optional HTTP bridge over the same tools on :8001
 # LAB 2 — Native local dev (no Docker, direct HTTP between services)
 # Run each target in a separate terminal tab.
 # Order: lab2-mcp → lab2-api → lab2-worker → lab2-ui
+# Langfuse is a Lab 3 (Docker) service, so these targets switch it off; without
+# a server to talk to the SDK logs errors on every call.
 # =============================================================================
 
 lab2-mcp: ## Lab 2 ➊  MCP server on :8001  (open a new terminal first)
 	cd apps/mcp-server && \
-	  GEMINI_API_KEY=$(GEMINI_API_KEY) LOG_FORMAT=text \
+	  GEMINI_API_KEY=$(GEMINI_API_KEY) LOG_FORMAT=text LANGFUSE_ENABLED=false \
 	  uvicorn server:app --host 0.0.0.0 --port 8001
 
 lab2-api: ## Lab 2 ➋  Job API on :8000  (open a new terminal)
 	cd apps/job-api && \
 	  GEMINI_API_KEY=$(GEMINI_API_KEY) \
 	  AGENT_RUNTIME_URL=http://localhost:8002 \
-	  LOG_FORMAT=text \
+	  LOG_FORMAT=text LANGFUSE_ENABLED=false \
 	  uvicorn main:app --host 0.0.0.0 --port 8000
 
 lab2-worker: ## Lab 2 ➌  Agent-runtime worker (HTTP mode) on :8002  (open a new terminal)
@@ -138,7 +140,7 @@ lab2-worker: ## Lab 2 ➌  Agent-runtime worker (HTTP mode) on :8002  (open a ne
 	  GEMINI_API_KEY=$(GEMINI_API_KEY) \
 	  MCP_SERVER_URL=http://localhost:8001 \
 	  JOB_API_URL=http://localhost:8000 \
-	  LOG_FORMAT=text \
+	  LOG_FORMAT=text LANGFUSE_ENABLED=false \
 	  python worker.py --mode http
 
 lab2-ui: ## Lab 2 ➍  Streamlit frontend on :8501  (open a new terminal)

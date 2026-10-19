@@ -105,3 +105,13 @@ def test_a_placeholder_project_does_not_block_the_other_providers(monkeypatch):
     monkeypatch.setenv("GCP_PROJECT", "your-gcp-project-id")
     get_settings.cache_clear()
     assert llm.resolve("openai", api_key="sk-x").provider.name == "openai"
+
+
+@pytest.mark.parametrize("placeholder", ["your-openai-api-key-here", "your-gemini-api-key-here", ""])
+def test_placeholder_keys_do_not_count_as_configured(monkeypatch, placeholder):
+    monkeypatch.setenv("OPENAI_API_KEY", placeholder)
+    monkeypatch.setenv("GEMINI_API_KEY", placeholder)
+    configured = llm.configured_providers()
+    assert "openai" not in configured
+    assert "google_ai_studio" not in configured
+    assert "vertex_ai" in configured
