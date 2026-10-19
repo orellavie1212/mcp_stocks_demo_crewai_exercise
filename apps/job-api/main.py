@@ -85,6 +85,12 @@ def get_firestore():
       Locally, it uses the GOOGLE_APPLICATION_CREDENTIALS env var or the
       Firestore emulator (FIRESTORE_EMULATOR_HOST).
     """
+    # A local run (Labs 2-3) has no Firestore: keep jobs in memory instead of
+    # calling Google's real Firestore API with the learner's own credentials
+    # (Lab 3 mounts ~/.config/gcloud into this container) against a project that
+    # does not exist. Set FIRESTORE_EMULATOR_HOST to use an emulator locally.
+    if settings.environment == "local" and not settings.use_firestore_emulator:
+        return None
     try:
         from google.cloud import firestore
         if settings.use_firestore_emulator:

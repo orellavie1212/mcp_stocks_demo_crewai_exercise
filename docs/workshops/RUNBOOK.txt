@@ -160,8 +160,8 @@ Every tab: cd into the repo and activate the venv (see Step 2).
 
 Open in your browser:    http://localhost:8501
 
-Expected in the logs: Tab 2 (Job API) prints "Firestore ... falling back to
-in-memory" warnings -- Lab 2 keeps jobs in memory, there is no Firestore.
+Lab 2 keeps jobs in memory (there is no Firestore), so jobs disappear when the
+Job API restarts.
 
 The Makefile auto-loads .env, so GCP_PROJECT and LLM_PROVIDER flow into every
 tab. Your gcloud login (Step 0.2) is picked up automatically.
