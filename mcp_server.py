@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 try:
     from dotenv import load_dotenv
@@ -825,7 +828,7 @@ def get_tools_by_names(tool_names: list, gemini_api_key: str = "") -> list:
         elif tool_name in TOOL_REGISTRY:
             tools.append(TOOL_REGISTRY[tool_name])
         else:
-            print(f"Warning: Unknown tool '{tool_name}' skipped")
+            logger.warning("Unknown tool %r skipped", tool_name)
     return tools
 
 def get_available_tools() -> list:

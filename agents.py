@@ -37,9 +37,12 @@ for _p in [
     os.path.join(_here, "packages", "shared-config"),
     os.path.join(_here, "packages", "shared-guardrails"),
     os.path.join(_here, "packages", "shared-observability"),
+    os.path.join(_here, "packages", "shared-models"),
 ]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+from models import validate_symbol
 
 try:
     from config import get_settings, get_llm
@@ -407,6 +410,17 @@ def run_crewai_analysis(
     """
     if not CREWAI_AVAILABLE:
         return {"error": "CrewAI not available"}
+
+    try:
+        symbol = validate_symbol(symbol)
+    except ValueError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_code": "invalid_symbol",
+            "timestamp": datetime.now().isoformat(),
+            "symbol": symbol,
+        }
 
     gemini_api_key = gemini_api_key.strip() if gemini_api_key else ""
     api_key = api_key.strip() if api_key else ""

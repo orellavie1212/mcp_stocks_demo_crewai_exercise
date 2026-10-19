@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import importlib
+import os
+import sys
 from typing import Any, Optional, Dict
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "packages", "shared-models"))
+from models import validate_symbol  # noqa: E402
 
 try:
     from dotenv import load_dotenv, find_dotenv  # type: ignore
@@ -52,29 +57,35 @@ def _error(name: str, message: str, status: int = 500, extra: Optional[Dict[str,
     return JSONResponse(data, status_code=status)
 
 
+class _SymbolBody(BaseModel):
+    symbol: str = Field(..., min_length=1)
+
+    @field_validator("symbol")
+    @classmethod
+    def _check_symbol(cls, v: str) -> str:
+        return validate_symbol(v)
+
+
 class SearchBody(BaseModel):
     q: str = Field(..., min_length=1, description="Company name or ticker text")
 
-class QuoteBody(BaseModel):
-    symbol: str = Field(..., min_length=1)
+class QuoteBody(_SymbolBody):
+    pass
 
-class SeriesBody(BaseModel):
-    symbol: str = Field(..., min_length=1)
+class SeriesBody(_SymbolBody):
     interval: str = Field("daily")
     lookback: int = Field(180, ge=1, le=5000)
 
-class IndicatorsBody(BaseModel):
-    symbol: str = Field(..., min_length=1)
+class IndicatorsBody(_SymbolBody):
     window_sma: int = Field(20, ge=2, le=500)
     window_ema: int = Field(50, ge=2, le=500)
     window_rsi: int = Field(14, ge=2, le=200)
 
-class EventsBody(BaseModel):
-    symbol: str = Field(..., min_length=1)
+class EventsBody(_SymbolBody):
+    pass
 
 
-class ExplainBody(BaseModel):
-    symbol: str = Field(..., min_length=1)
+class ExplainBody(_SymbolBody):
     language: str = Field("en", description="Two-letter code: 'en' or 'he'")
     tone: str = Field("neutral", description="neutral | concise | educational | headline")
     risk_profile: str = Field("balanced", description="cautious | balanced | aggressive")
@@ -82,9 +93,8 @@ class ExplainBody(BaseModel):
     bullets: bool = Field(True, description="If true, return bullet points")
     gemini_api_key: str = Field("", description="Gemini API key for LLM explanations")
 
-class BundleBody(BaseModel):
+class BundleBody(_SymbolBody):
     """Fetch price series + indicators + events in one shot."""
-    symbol: str = Field(..., min_length=1)
     lookback: int = Field(180, ge=1, le=5000)
     window_sma: int = Field(20, ge=2, le=500)
     window_ema: int = Field(50, ge=2, le=500)

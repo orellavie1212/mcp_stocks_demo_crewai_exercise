@@ -8,7 +8,15 @@ yfinance>=0.2.50
 requests>=2.31
 python-dotenv>=1.0
 streamlit>=1.36
-fastmcp>=0.2.5
+# Official MCP Python SDK: the code imports `mcp.server.fastmcp`, which lives
+# here, NOT in the third-party `fastmcp` package this used to list. Capped <2.0
+# because mcp 2.0 removed mcp.server.fastmcp (see apps/mcp-server/requirements.txt).
+mcp>=1.9,<2.0
+# Starlette 1.4.0 made `thread_minimum_size` a required keyword-only argument of
+# GZipResponder; Streamlit 1.61's MediaAwareGZipMiddleware subclasses it without
+# passing it, so every browser request 500s ("Connection error"). Cap until
+# Streamlit catches up.
+starlette<1.4
 matplotlib
 
 # CrewAI (Lab 1 — original demo, provider switcher shared with Labs 2-4:
