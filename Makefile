@@ -176,7 +176,7 @@ format: ## Format all Python code
 build: ## Build all Docker images
 	@for svc in mcp-server job-api agent-runtime frontend-streamlit; do \
 	  echo "🔨 Building $$svc..."; \
-	  docker build -t stock-agent-$$svc:latest -f apps/$$svc/Dockerfile apps/$$svc; \
+	  docker build -t stock-agent-$$svc:latest -f apps/$$svc/Dockerfile .; \
 	done
 	@echo "🔨 Building litellm-proxy..."
 	docker build -t stock-agent-litellm-proxy:latest -f docker/litellm/Dockerfile docker/litellm
