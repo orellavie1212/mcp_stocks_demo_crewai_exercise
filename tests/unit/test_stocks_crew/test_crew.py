@@ -202,6 +202,14 @@ def test_list_mcp_tools_does_a_real_handshake():
     assert all(t["description"] for t in offered)
 
 
+def _stub_llm():
+    """A real LLM object that is never called, so build_crew does not depend on
+    which provider .env happens to select or on any key being present."""
+    from crewai import LLM
+
+    return LLM(model="openai/gpt-4o-mini", api_key="sk-not-used")
+
+
 def _stub_mcp_tools():
     """Stand-ins for what MCPServerAdapter hands back.
 
@@ -228,7 +236,7 @@ def _stub_mcp_tools():
 
 def test_build_crew_only_grants_the_tools_each_agent_asked_for():
     """The allow-list is enforced against the live tool objects, by name."""
-    _, granted = crew.build_crew(_stub_mcp_tools(), "AAPL")
+    _, granted = crew.build_crew(_stub_mcp_tools(), "AAPL", llm=_stub_llm())
     assert granted["research"] == ["search_symbols", "latest_quote", "price_series"]
     assert granted["technical"] == ["indicators", "detect_events"]
     assert granted["sector"] == ["search_symbols", "latest_quote", "indicators"]
@@ -261,7 +269,7 @@ def test_the_report_task_opts_into_the_builtin_guardrail():
 
 
 def test_the_guardrail_is_attached_to_the_report_task_and_nothing_else():
-    crew_obj, _ = crew.build_crew(_stub_mcp_tools(), "AAPL")
+    crew_obj, _ = crew.build_crew(_stub_mcp_tools(), "AAPL", llm=_stub_llm())
     guarded = [t for t in crew_obj.tasks if t.guardrail is not None]
     assert len(guarded) == 1
     assert type(guarded[0].guardrail).__name__ == "HallucinationGuardrail"
@@ -309,7 +317,10 @@ def test_guardrail_status_reports_that_it_does_not_enforce():
 
 def test_tool_overrides_replace_the_yaml_defaults():
     _, granted = crew.build_crew(
-        _stub_mcp_tools(), "AAPL", tool_overrides={"research": ["latest_quote"]}
+        _stub_mcp_tools(),
+        "AAPL",
+        tool_overrides={"research": ["latest_quote"]},
+        llm=_stub_llm(),
     )
     assert granted["research"] == ["latest_quote"]
     # untouched agents keep their defaults

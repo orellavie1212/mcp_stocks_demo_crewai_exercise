@@ -104,7 +104,21 @@ def test_summary_counts_successes_and_failures():
     summary = tracer.summary()
     assert summary["tool_calls_count"] == 3
     assert summary["tool_calls_successful"] == 2
-    assert [c["tool_name"] for c in summary["tool_trace"]][:2] == ["indicators", "detect_events"]
+    assert {c["tool_name"] for c in summary["tool_trace"]} == {
+        "indicators",
+        "detect_events",
+        "latest_quote",
+    }
+
+
+def test_calls_are_returned_in_timestamp_order_whatever_order_they_landed():
+    """Event handlers run on a thread pool, so records can be appended out of
+    order; `calls` must hand them back in the order they finished."""
+    tracer = ToolTracer()
+    tracer._record({"timestamp": "2026-01-01T00:00:02+00:00", "tool_name": "second"})
+    tracer._record({"timestamp": "2026-01-01T00:00:01+00:00", "tool_name": "first"})
+    tracer._record({"timestamp": "2026-01-01T00:00:03+00:00", "tool_name": "third"})
+    assert [c["tool_name"] for c in tracer.calls] == ["first", "second", "third"]
 
 
 def test_the_tracer_stops_listening_when_the_block_ends():

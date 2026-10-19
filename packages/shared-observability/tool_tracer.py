@@ -66,8 +66,14 @@ class ToolTracer:
 
     @property
     def calls(self) -> List[Dict[str, Any]]:
+        """Recorded calls in the order they finished.
+
+        Handlers run on the event bus's thread pool, so two calls that land
+        close together can be appended out of order. Sorting by timestamp
+        (ISO-8601, same timezone) restores the order the agents made them in.
+        """
         with self._lock:
-            return list(self._calls)
+            return sorted(self._calls, key=lambda c: c.get("timestamp") or "")
 
     @property
     def evidence(self) -> List[str]:
