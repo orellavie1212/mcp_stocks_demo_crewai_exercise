@@ -36,7 +36,7 @@ help:  ## Show this help
 # LOCAL DEV ENVIRONMENT SETUP (uv — WSL2/Windows, macOS, Ubuntu)
 # =============================================================================
 
-dev-install: ## Install all Python deps with uv (Lab 1 root requirements.txt + every apps/*/requirements.txt)
+dev-install: ## Install all Python deps with uv in one resolve (root requirements.txt + every apps/*/requirements.txt)
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install it: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
 	@# --system only when no venv is active (e.g. the devcontainer, which
 	@# installs to the container's system Python like the old `pip3 --user`
@@ -44,12 +44,11 @@ dev-install: ## Install all Python deps with uv (Lab 1 root requirements.txt + e
 	@# into the system/conda Python instead, defeating the venv entirely.
 	@if [ -n "$$VIRTUAL_ENV" ]; then echo "Installing into active venv: $$VIRTUAL_ENV"; \
 	else echo "No active venv — installing with --system"; fi
-	uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r requirements.txt
-	@for r in apps/*/requirements.txt; do \
-	  echo "Installing $$r..."; \
-	  uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r "$$r"; \
-	done
-	@echo "✅ All Python dependencies installed via uv."
+	@# One resolve over every requirements file, not one install per file: separate
+	@# installs let a later file bump a package (e.g. requests) past a constraint an
+	@# earlier one (crewai-tools) needs, and nothing reports it.
+	uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r requirements.txt $$(for r in apps/*/requirements.txt; do printf -- '-r %s ' "$$r"; done)
+	@uv pip check $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) && echo "✅ All Python dependencies installed via uv (consistent)."
 
 # =============================================================================
 # LOCAL DEVELOPMENT

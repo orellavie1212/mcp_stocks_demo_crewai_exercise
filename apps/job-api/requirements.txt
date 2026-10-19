@@ -11,7 +11,9 @@ google-cloud-firestore>=2.16
 google-cloud-pubsub>=2.21
 
 # Redis (rate limiting + idempotency)
-redis[asyncio]>=5.0
+# No "asyncio" extra: redis-py folded asyncio support into the base package, and
+# recent versions don't define that extra (uv warns). redis.asyncio still works.
+redis>=5.0
 
 # Observability
 opentelemetry-sdk>=1.24
