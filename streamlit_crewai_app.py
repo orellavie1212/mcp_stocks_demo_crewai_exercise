@@ -24,6 +24,16 @@ import streamlit as st
 # or without `uv sync` having installed the package.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
+try:
+    from dotenv import load_dotenv
+
+    # The sidebar checks os.environ for GCP_PROJECT and the provider keys, so
+    # .env has to be in the environment (make exports it too; this covers a
+    # plain `streamlit run`). Values already set in the shell win.
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 from stocks_crew import llm as llm_config  # noqa: E402
 from stocks_crew.console import use_utf8_console  # noqa: E402
 from stocks_crew.crew import default_agent_tools, list_mcp_tools, run_analysis
