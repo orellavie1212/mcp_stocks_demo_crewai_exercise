@@ -28,7 +28,7 @@ on:
 env:
   GCP_REGION: us-central1
   AR_HOST: us-central1-docker.pkg.dev
-  PYTHON_VERSION: "3.11"
+  PYTHON_VERSION: "3.12"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -47,28 +47,32 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install test dependencies
+      # Same set of requirements files `make dev-install` resolves together for
+      # Labs 1-3, so CI tests the environment students get.
+      - name: Install dependencies
         run: |
-          pip install pytest pydantic pydantic-settings ruff
+          pip install -r requirements.txt \
+            -r apps/agent-runtime/requirements.txt \
+            -r apps/frontend-streamlit/requirements.txt \
+            -r apps/job-api/requirements.txt \
+            -r apps/mcp-server/requirements.txt \
+            pytest pytest-asyncio httpx ruff
+          pip check
 
+      # Fails on real errors only: syntax errors and undefined names. Ruff's
+      # broader default rule set flags ~350 style issues in code that predates
+      # this check (unused imports, deliberate sys.path imports), and the old
+      # `--ignore W503` made ruff exit before checking anything because that
+      # rule no longer exists. Widen this selection deliberately, not by accident.
       - name: Lint with ruff
         run: |
-          ruff check packages/ apps/ tests/ --ignore E501,W503
+          ruff check packages/ apps/ tests/ src/ streamlit_crewai_app.py \
+            --select E9,F63,F7,F82
 
-      - name: Run unit tests — guardrails
-        run: |
-          PYTHONPATH=packages/shared-models:packages/shared-config:packages/shared-observability:packages/shared-guardrails \
-          python -m pytest tests/unit/test_guardrails/ -v
-
-      - name: Run unit tests — models
-        run: |
-          PYTHONPATH=packages/shared-models \
-          python -m pytest tests/unit/test_models/ -v
-
-      - name: Run unit tests — MCP server tools
-        run: |
-          PYTHONPATH=packages/shared-models:packages/shared-config:packages/shared-observability:. \
-          python -m pytest tests/unit/test_mcp_server/ -v
+      # The whole offline unit suite: shared packages, MCP servers, and the
+      # Lab 1 crew. Network and real-LLM tests are deselected by pytest.ini.
+      - name: Run unit tests
+        run: python -m pytest tests/unit -v
 
   # ---------------------------------------------------------------------------
   # Job 2: Build + Push Docker images (only on push to main)

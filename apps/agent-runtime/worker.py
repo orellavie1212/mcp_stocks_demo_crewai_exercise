@@ -33,7 +33,10 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:  # only for the annotation; the real import is lazy (see __aenter__)
+    from mcp import ClientSession
 
 import httpx
 from crewai import Agent, Crew, Process, Task
