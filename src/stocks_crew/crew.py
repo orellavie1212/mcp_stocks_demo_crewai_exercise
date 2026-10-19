@@ -475,7 +475,7 @@ def run_analysis(
 
 
 if __name__ == "__main__":
-    # `uv run python -m stocks_crew.crew --list-tools` — prove the server is real
+    # `make lab1-tools` — prove the server is real
     # without spending a token.
     from .console import use_utf8_console
 
@@ -484,7 +484,7 @@ if __name__ == "__main__":
     if "--list-tools" in sys.argv:
         print(json.dumps(list_mcp_tools(), indent=2))
     else:
-        # `uv run python -m stocks_crew.crew NVDA --provider=gemini`
+        # `python -m stocks_crew.crew NVDA --provider=openai`
         target = next((a for a in sys.argv[1:] if not a.startswith("-")), "AAPL")
         chosen = next(
             (a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--provider=")),

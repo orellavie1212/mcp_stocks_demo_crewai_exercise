@@ -10,10 +10,14 @@
 
 | Concept | Where to find it |
 |---|---|
-| Agent architecture (CrewAI) | `apps/agent-runtime/worker.py` |
+| Lab 1: a CrewAI crew as a real MCP client (stdio) | `src/stocks_crew/` — see [README_CrewAI.md](README_CrewAI.md) |
+| Agents and tasks as YAML, per-agent tool allow-lists | `src/stocks_crew/config/agents.yaml`, `tasks.yaml` |
+| Agent architecture at scale (CrewAI workers) | `apps/agent-runtime/worker.py` |
 | MCP server as a service | `apps/mcp-server/server.py` |
 | Async job processing | `apps/job-api/main.py` → `docker/docker-compose.yml` |
 | 3-layer guardrails | `packages/shared-guardrails/guardrails.py` |
+| Evidence-grounding check (does every figure trace to a tool result?) | `packages/shared-guardrails/grounding.py` |
+| Tool-call tracing from the CrewAI event bus | `packages/shared-observability/tool_tracer.py` |
 | Structured logging + tracing | `packages/shared-observability/observability.py` |
 | LLM cost routing | `packages/shared-config/config.py` → `get_llm()` |
 | GCP infrastructure as code | `infra/terraform/main.tf` |
@@ -30,7 +34,8 @@ Stage 1: Local Demo          Stage 2: Containers         Stage 3: Cloud-Ready   
 One Python script            docker-compose.yml          Cloud Run (3 services)       GKE Autopilot workers
 Everything in-process        Network boundaries          Secret Manager               Pub/Sub async queue
 No observability             Redis + Pub/Sub emulator    Cloud Logging                HPA autoscaling
-OpenAI or Gemini key in .env Langfuse (local)            Cloud Trace                  Workload Identity
+Vertex AI login, or a        Langfuse (local)            Cloud Trace                  Workload Identity
+Gemini/OpenAI key in .env
 (LLM_PROVIDER switch)        LiteLLM Proxy (routing +                                 LiteLLM Proxy (opt-in)
                               basic request limits)
                                                          Firestore                    Langfuse (cloud)
@@ -42,19 +47,21 @@ OpenAI or Gemini key in .env Langfuse (local)            Cloud Trace            
 
 ### Prerequisites
 - Docker Desktop
-- A free [Google AI Studio](https://aistudio.google.com/apikey) API key, or an
-  [OpenAI](https://platform.openai.com/api-keys) API key — either works, set via
-  `LLM_PROVIDER` in `.env`
+- One way to reach a model, chosen with `LLM_PROVIDER` in `.env`:
+  - `vertex_ai` (default): a Google Cloud project and
+    `gcloud auth application-default login` — no key
+  - `google_ai_studio`: a free [Google AI Studio](https://aistudio.google.com/apikey) key in `GEMINI_API_KEY`
+  - `openai`: an [OpenAI](https://platform.openai.com/api-keys) key in `OPENAI_API_KEY`
 
 ```bash
 # 1. Clone
-git clone https://github.com/zviba/mcp_stocks_demo_crewai_exercise
+git clone https://github.com/orellavie1212/mcp_stocks_demo_crewai_exercise
 cd mcp_stocks_demo_crewai_exercise
 
 # 2. Configure
 cp .env.example .env
-# Edit .env: set GEMINI_API_KEY=your-key-here
-# (or LLM_PROVIDER=openai and OPENAI_API_KEY=your-key-here)
+# Edit .env: set GCP_PROJECT=<your project id>   (LLM_PROVIDER=vertex_ai, the default)
+# or LLM_PROVIDER=google_ai_studio + GEMINI_API_KEY, or LLM_PROVIDER=openai + OPENAI_API_KEY
 
 # 3. Start everything
 make lab3-up
@@ -75,6 +82,22 @@ open http://localhost:8501
 | Pub/Sub emulator | localhost:8085 | Async message queue |
 
 **Langfuse login:** `admin@example.com` / `admin123`
+
+---
+
+## 🧪 Lab 1 — Run the crew on your machine (no Docker)
+
+One process: the crew starts the MCP server itself and talks to it over stdio.
+
+```bash
+uv venv --python 3.12 .venv && source .venv/bin/activate
+make dev-install          # Lab 1 + every apps/*/requirements.txt
+make lab1-tools           # handshake with the MCP server, list its tools (no LLM, no tokens)
+make lab1-ui              # Streamlit UI on http://localhost:8501
+```
+
+Alternatively, `uv sync` installs just Lab 1 from `pyproject.toml` / `uv.lock`.
+Details, the architecture and how to change the crew: [README_CrewAI.md](README_CrewAI.md).
 
 ---
 
@@ -114,7 +137,10 @@ make infra-down  # Destroys GKE + Redis + Cloud SQL (keeps Firestore/Pub/Sub)
 │   ├── agent-runtime/         # CrewAI workers consuming Pub/Sub
 │   └── mcp-server/            # Tool/data service (yfinance + Gemini)
 │
+├── src/stocks_crew/           # Lab 1: the crew, its MCP server, YAML agents/tasks
+│
 ├── packages/
+│   ├── shared-datasource/     # yfinance + Yahoo search (Lab 1 and mcp-server)
 │   ├── shared-models/         # Pydantic models (contract between services)
 │   ├── shared-config/         # Settings + LLM factory (model routing)
 │   ├── shared-observability/  # Structured logging + Langfuse + Cloud Trace
@@ -128,7 +154,7 @@ make infra-down  # Destroys GKE + Redis + Cloud SQL (keeps Firestore/Pub/Sub)
 │   └── docker-compose.yml     # Full local stack
 │
 ├── tests/
-│   └── unit/                  # pytest unit tests (guardrails, models)
+│   └── unit/                  # pytest unit tests (guardrails, models, config, MCP, Lab 1 crew)
 │
 ├── scripts/
 │   └── setup-gcp.sh           # One-command GCP deployment
@@ -137,6 +163,7 @@ make infra-down  # Destroys GKE + Redis + Cloud SQL (keeps Firestore/Pub/Sub)
 │   └── ci-cd.yml              # GitHub Actions CI/CD
 │
 ├── docs/architecture/         # Architecture diagrams and explanations
+├── pyproject.toml, uv.lock    # Lab 1 packaging (uv sync)
 ├── .env.example               # Environment variable template
 └── Makefile                   # All commands in one place
 ```
@@ -180,6 +207,8 @@ make up            # Start local stack
 make down          # Stop local stack
 make logs          # Tail all service logs
 make test          # Run unit tests
+make lab1-ui       # Lab 1 Streamlit UI
+make lab1-tools    # Lab 1: list the MCP server's tools
 make lint          # Lint with ruff
 make format        # Format with ruff
 
@@ -222,4 +251,4 @@ make scale-workers REPLICAS=5  # Scale agent pods
 - [Cloud Pub/Sub vs Kafka](docs/architecture/messaging-comparison.md)
 - [Langfuse Self-Hosted](https://langfuse.com/docs/deployment/self-host)
 - [GKE Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview)
-- [Original Demo Repo](https://github.com/zviba/mcp_stocks_demo_crewai_exercise)
+- [Original Demo Repo](https://github.com/zviba/mcp_stocks_demo_crewai_exercise) — the Lab 1 design (YAML crew, stdio MCP, grounding check) comes from here

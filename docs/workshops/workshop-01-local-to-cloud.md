@@ -30,9 +30,10 @@ By the end of this workshop, students will be able to:
 
 ### 1.1 Open the original demo code
 
-Look at the original files in the repo root:
-- `agents.py` — how agents are defined
-- `mcp_server.py` — how tools are served
+Look at the Lab 1 files:
+- `src/stocks_crew/config/agents.yaml` and `tasks.yaml` — how agents and tasks are defined
+- `src/stocks_crew/crew.py` — builds the crew and talks to the MCP server
+- `src/stocks_crew/mcp_server.py` — how tools are served (real MCP over stdio)
 - `streamlit_crewai_app.py` — the original UI
 
 **Discussion questions:**
@@ -44,8 +45,8 @@ Look at the original files in the repo root:
 ### 1.2 Run the original demo
 
 ```bash
-pip install -r requirements.txt
-streamlit run streamlit_crewai_app.py
+make dev-install
+make lab1-ui
 ```
 
 Submit a query like "Analyse AAPL". Watch it block for 1-2 minutes.
@@ -173,7 +174,7 @@ STRONG → gemini-3.1-pro-preview         (report synthesis — used once per jo
 
 Open `apps/mcp-server/server.py`
 
-Compare with the original `mcp_server.py`:
+Compare with Lab 1's `src/stocks_crew/mcp_server.py` and `tools.py`:
 - What's the same? (the calculation logic)
 - What's different? (FastAPI endpoints, auth, logging, health checks)
 

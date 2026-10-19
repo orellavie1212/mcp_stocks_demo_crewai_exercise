@@ -49,60 +49,62 @@ cp .env.example .env
 ```
 Browser ──► streamlit_crewai_app.py  (blocks until done, ~1-2 min)
                 │
-                │  direct Python import
+                │  direct Python call: run_analysis()
                 ▼
-            agents.py
-            (CrewAI: 4 agents, 4 tasks, sequential crew)
+            src/stocks_crew/crew.py
+            (CrewAI: 4 agents, 4 tasks, sequential crew, built from
+             config/agents.yaml + config/tasks.yaml)
                 │
-                │  direct Python import
+                │  real MCP: JSON-RPC over stdio to a child process
                 ▼
-            mcp_server.py
-            (MCP tools: search_symbols, get_quote, get_indicators…)
+            src/stocks_crew/mcp_server.py
+            (MCP tools: search_symbols, latest_quote, price_series,
+             indicators, detect_events)
                 │
                 ▼
-            datasource.py → yfinance → Yahoo Finance API
-                │
-            api.py  (FastAPI on :8001, used only for health check)
+            tools.py → packages/shared-datasource/datasource.py → yfinance → Yahoo Finance
 ```
+
+There is no API server in this path: the crew starts the MCP server itself and
+stops it when the run ends.
 
 **Key files:**
 
 | File | Role |
 |------|------|
-| `streamlit_crewai_app.py` | Web UI, calls `run_crewai_analysis()` directly |
-| `agents.py` | Agent + task definitions, `crewai.LLM` — Gemini, Vertex AI, or OpenAI (sidebar picker) |
-| `mcp_server.py` | `@tool`-decorated functions, `get_tools_by_names()` |
-| `datasource.py` | yfinance wrapper |
-| `api.py` | FastAPI `/health` endpoint (checked by the Streamlit app) |
-| `requirements.txt` | Root-level deps: crewai, streamlit, yfinance, fastapi |
+| `streamlit_crewai_app.py` | Web UI: provider, language/tone, per-agent tool pickers, guardrail panel, tool trace |
+| `src/stocks_crew/crew.py` | `run_analysis()`: starts the MCP server, builds the crew from YAML, runs it, checks the report |
+| `src/stocks_crew/config/agents.yaml`, `tasks.yaml` | Who is in the crew, which tools each may call, and what each task asks for |
+| `src/stocks_crew/llm.py` | Picks the model — Vertex AI (default), Google AI Studio, or OpenAI — via `packages/shared-config` |
+| `src/stocks_crew/mcp_server.py` | FastMCP server: five `@mcp.tool()` wrappers over `tools.py` |
+| `src/stocks_crew/tools.py`, `analytics.py` | The tool functions and the pandas indicators |
+| `packages/shared-datasource/datasource.py` | yfinance wrapper (shared with `apps/mcp-server`) |
+| `src/stocks_crew/api.py` | Optional FastAPI bridge over the same tools (`make lab1-api`, :8001) |
+| `pyproject.toml`, `uv.lock` | Lab 1 packaging (`uv sync`); `requirements.txt` is what `make dev-install` uses |
 
 ### Run Instructions
 
-**Terminal 1 — MCP API (health check endpoint):**
 ```bash
-pip install -r requirements.txt
-uvicorn api:app --host 127.0.0.1 --port 8001
+make dev-install       # once, with your venv active
+make lab1-tools        # optional: real MCP handshake, lists the 5 tools, no LLM
+make lab1-ui           # Streamlit UI
 ```
 
-**Terminal 2 — Streamlit UI:**
-```bash
-streamlit run streamlit_crewai_app.py
-```
-
-Open http://localhost:8501. In the sidebar, pick an **LLM Provider** — Google AI Studio, Vertex AI (ADC), or OpenAI — enter that provider's API key (Vertex AI needs none), type `AAPL`, click **Start Analysis**.
+Open http://localhost:8501. In the sidebar, pick a **Provider** — Google Gemini (Vertex AI), Google Gemini (AI Studio), or OpenAI — and enter that provider's API key (Vertex AI needs none, only your GCP login and `GCP_PROJECT`). Type `AAPL`, click **Start analysis**.
 
 ### What to Observe
 - The browser tab spins for 1-2 minutes while the crew runs
 - Open a second tab → try to submit another query → it also blocks
 - There is no retry if the analysis fails halfway
-- You can't see which tool call took the longest
+- The **tool call trace** under the report lists every MCP call: which agent made it, the arguments the model chose, how long it took
+- Untick a tool for an agent in the UI and re-run — the report degrades; that is the allow-list at work
 - The report-writing task has CrewAI's built-in `HallucinationGuardrail` attached (visible in the result's `crewai_guardrail` field) — in the open-source `crewai` package it's a no-op that passes every output; the actual check is the deterministic `guardrail` (grounding) field next to it, built from the real tool-call evidence
 
 ### Discussion Questions
 1. What happens if 10 students submit at the same time?
 2. Where is the API key stored? (Answer: Streamlit session state — gone on refresh)
 3. What happens if the browser closes during analysis?
-4. Can you tell if the agents actually called the tools, or just made up data?
+4. Can you tell if the agents actually called the tools, or just made up data? (Check the trace and the guardrail panel.)
 
 ---
 
@@ -127,7 +129,7 @@ Browser ──► apps/frontend-streamlit/app.py
                 ▼
             apps/agent-runtime/worker.py --mode http  (:8002)
             (runs CrewAI crew, PATCHes job status back to job-api)
-                │  POST /quote /indicators /events…
+                │  real MCP (Streamable HTTP) → /mcp/ tools
                 ▼
             apps/mcp-server/server.py  (:8001)
             (production MCP server: auth, logging, health checks)
@@ -141,8 +143,8 @@ Browser ──► apps/frontend-streamlit/app.py
 | Aspect | Lab 1 | Lab 2 |
 |--------|-------|-------|
 | Execution | Blocking (browser waits) | Async (202 → poll) |
-| Agent invocation | Direct Python import | HTTP POST /analyze |
-| Tool calls | Direct Python import | HTTP POST /quote, /indicators… |
+| Agent invocation | Direct Python call | HTTP POST /analyze |
+| Tool calls | MCP over stdio to a child process | MCP over Streamable HTTP to `/mcp/` |
 | Job state | Streamlit session only | In-memory dict in job-api |
 | Concurrency | 1 request at a time | Multiple jobs simultaneously |
 
@@ -433,7 +435,7 @@ make clean        # stop + remove volumes + images
                     │  GKE Autopilot: agent-runtime│  (HPA scales on queue depth)
                     │  Workload Identity → Vertex AI│  (no API key needed!)
                     └──────────────┬──────────────┘
-                                   │  POST /quote /indicators…
+                                   │  real MCP (Streamable HTTP) → /mcp/
                     ┌──────────────▼──────────────┐
                     │  Cloud Run: mcp-server       │  (autoscale 0→N)
                     │  Vertex AI: gemini-3.5-flash │  (LLM_PROVIDER=vertex_ai)

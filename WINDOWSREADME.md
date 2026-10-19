@@ -94,7 +94,7 @@ to use it.
 ### Option A — venv + uv (recommended, fastest)
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+uv venv --python 3.12 .venv && source .venv/bin/activate
 make dev-install    # uv-installs requirements.txt + every apps/*/requirements.txt
 ```
 
@@ -120,7 +120,7 @@ exec bash
 Create the project env and install deps (uv works fine inside an activated conda env too):
 
 ```bash
-conda create -n stock-agent python=3.11 -y
+conda create -n stock-agent python=3.12 -y
 conda activate stock-agent
 make dev-install
 ```
@@ -129,15 +129,15 @@ Each new WSL tab: `cd ~/mcp_stocks_demo_crewai_exercise && conda activate stock-
 
 ---
 
-## 4) Lab 1 — Sync local (two tabs)
+## 4) Lab 1 — Sync local (one tab)
 
 ```bash
-# Tab 1 — health-check API on :8001
-uvicorn api:app --host 127.0.0.1 --port 8001
-
-# Tab 2 — Streamlit UI on :8501
-streamlit run streamlit_crewai_app.py
+make lab1-tools    # optional: real MCP handshake, lists the 5 tools (no LLM, no tokens)
+make lab1-ui       # Streamlit UI on :8501
 ```
+
+There is no API server to start first: the crew launches the MCP server itself as a
+child process over stdio. Details: [README_CrewAI.md](README_CrewAI.md).
 
 Open http://localhost:8501 in your Windows browser. WSL2 forwards localhost to Windows
 automatically.
