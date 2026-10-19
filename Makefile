@@ -103,6 +103,20 @@ lab3-up-simple: ## Start simplified stack (sync mode, no Pub/Sub, no Redis)
 	docker compose --env-file .env -f docker/docker-compose.simple.yml up --build -d
 
 # =============================================================================
+# LAB 1 — Native, single process. The crew spawns the MCP server itself over
+# stdio, so there is nothing else to start first.
+# =============================================================================
+
+lab1-ui: ## Lab 1  Streamlit UI on :8501 (starts the MCP server on demand)
+	streamlit run streamlit_crewai_app.py
+
+lab1-tools: ## Lab 1  Prove the MCP server is real: handshake + list its tools (no LLM, no tokens)
+	PYTHONPATH=src python -m stocks_crew.crew --list-tools
+
+lab1-api: ## Lab 1  Optional HTTP bridge over the same tools on :8001
+	PYTHONPATH=src uvicorn stocks_crew.api:app --host 127.0.0.1 --port 8001
+
+# =============================================================================
 # LAB 2 — Native local dev (no Docker, direct HTTP between services)
 # Run each target in a separate terminal tab.
 # Order: lab2-mcp → lab2-api → lab2-worker → lab2-ui
@@ -142,6 +156,7 @@ test: ## Run all unit tests
 	cd packages/shared-guardrails && python -m pytest ../../tests/unit/test_guardrails/ -v
 	cd packages/shared-config && python -m pytest ../../tests/unit/test_config/ -v
 	cd apps/mcp-server && python -m pytest ../../tests/unit/test_mcp_server/ -v
+	python -m pytest tests/unit/test_stocks_crew/ -v
 
 test-integration: ## Run integration tests (requires running stack)
 	python -m pytest tests/integration/ -v --timeout=60

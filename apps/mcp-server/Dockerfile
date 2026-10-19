@@ -41,7 +41,7 @@ COPY packages/shared-config /app/packages/shared-config
 COPY packages/shared-observability /app/packages/shared-observability
 
 # Copy original datasource (unchanged business logic)
-COPY datasource.py /app/datasource.py
+COPY packages/shared-datasource/datasource.py /app/datasource.py
 
 # Copy service code
 COPY apps/mcp-server/server.py /app/server.py

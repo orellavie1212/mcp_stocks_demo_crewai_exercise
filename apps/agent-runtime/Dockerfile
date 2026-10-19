@@ -24,7 +24,7 @@ COPY packages/shared-models /app/packages/shared-models
 COPY packages/shared-guardrails /app/packages/shared-guardrails
 
 # Copy datasource (shared business logic)
-COPY datasource.py /app/datasource.py
+COPY packages/shared-datasource/datasource.py /app/datasource.py
 
 COPY apps/agent-runtime/worker.py /app/worker.py
 
