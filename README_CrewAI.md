@@ -183,7 +183,8 @@ python -m pytest -m network                       # also hits Yahoo Finance
 | Sidebar says "Could not reach the MCP server" | run `make lab1-tools` to see the actual error |
 | Browser shows only "Connection error" | old Streamlit with Starlette 1.4+; `pip install -U "streamlit>=1.66"` |
 | `gemini_api_key_required` / `openai_api_key_required` | set that provider's key in `.env` or the sidebar |
-| Vertex AI auth or project errors | `gcloud auth application-default login`, and `GCP_PROJECT` in `.env` |
+| `gcp_project_required` or "Permission denied on resource project your-gcp-project-id" | `GCP_PROJECT` is still the placeholder, or there is no `.env`: `cp .env.example .env`, set `GCP_PROJECT`, restart |
+| Vertex AI auth errors | `gcloud auth application-default login` |
 | LLM calls fail with an unknown host `litellm-proxy` | empty `LITELLM_BASE_URL` in `.env` |
 | Windows console floods with `charmap` codec errors | run inside WSL, or use the Streamlit UI (it switches stdout to UTF-8) |
 | Report has an "ungrounded figures" list | the model wrote a number no tool returned; read the trace |

@@ -78,3 +78,30 @@ def test_configured_providers_lists_only_those_with_a_key(monkeypatch):
     assert "openai" in configured
     assert "vertex_ai" in configured  # ADC, no key to check
     assert "google_ai_studio" not in configured
+
+
+def test_vertex_ai_is_the_default_provider_when_nothing_is_configured(monkeypatch):
+    """No .env, no LLM_PROVIDER: a learner who skipped .env gets Vertex AI (their
+    Google login), not a demand for a Gemini key."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    get_settings.cache_clear()
+    assert llm.default_provider() == "vertex_ai"
+
+
+@pytest.mark.parametrize("placeholder", ["your-gcp-project-id", "local-project", ""])
+def test_vertex_with_a_placeholder_project_is_refused_with_a_clear_error(
+    monkeypatch, placeholder
+):
+    monkeypatch.setenv("LLM_PROVIDER", "vertex_ai")
+    monkeypatch.setenv("GCP_PROJECT", placeholder)
+    get_settings.cache_clear()
+    with pytest.raises(llm.MissingGCPProject) as exc:
+        llm.resolve()
+    assert exc.value.error_code == "gcp_project_required"
+    assert "GCP_PROJECT" in str(exc.value)
+
+
+def test_a_placeholder_project_does_not_block_the_other_providers(monkeypatch):
+    monkeypatch.setenv("GCP_PROJECT", "your-gcp-project-id")
+    get_settings.cache_clear()
+    assert llm.resolve("openai", api_key="sk-x").provider.name == "openai"

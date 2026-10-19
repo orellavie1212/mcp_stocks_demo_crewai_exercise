@@ -48,7 +48,7 @@ PROVIDERS: Dict[str, Provider] = {
     ),
 }
 
-DEFAULT_PROVIDER = "google_ai_studio"
+DEFAULT_PROVIDER = "vertex_ai"
 
 
 class MissingAPIKey(ValueError):

@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     gcp_project: str = Field(default="local-project", alias="GCP_PROJECT")
     gcp_region: str = Field(default="us-central1", alias="GCP_REGION")
 
-    llm_provider: str = Field(default="google_ai_studio", alias="LLM_PROVIDER")
+    # Vertex AI is the workshop default: it authenticates with the learner's
+    # Google login (application-default credentials), no API key. A Gemini or
+    # OpenAI key is the alternative: LLM_PROVIDER=google_ai_studio | openai.
+    llm_provider: str = Field(default="vertex_ai", alias="LLM_PROVIDER")
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
 
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")

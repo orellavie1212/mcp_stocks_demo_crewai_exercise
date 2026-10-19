@@ -334,3 +334,14 @@ def test_a_real_run_calls_real_tools():
     assert result["success"], result.get("error")
     assert result["tool_calls_count"] > 0, "the crew answered without calling any tool"
     assert result["result"].strip()
+
+
+def test_run_analysis_reports_a_placeholder_gcp_project_in_band(monkeypatch):
+    from config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "vertex_ai")
+    monkeypatch.setenv("GCP_PROJECT", "your-gcp-project-id")
+    get_settings.cache_clear()
+    result = crew.run_analysis("AAPL")
+    assert result["success"] is False
+    assert result["error_code"] == "gcp_project_required"

@@ -24,6 +24,7 @@ from providers import (  # noqa: E402
 __all__ = [
     "PROVIDERS",
     "LLMConfig",
+    "MissingGCPProject",
     "MissingAPIKey",
     "Provider",
     "UnknownProvider",
@@ -33,6 +34,28 @@ __all__ = [
     "provider_names",
     "resolve",
 ]
+
+
+#: What GCP_PROJECT holds before anyone has set it: the Makefile's default, the
+#: .env.example value, and the settings default.
+PLACEHOLDER_PROJECTS = {"", "your-gcp-project-id", "local-project"}
+
+
+class MissingGCPProject(ValueError):
+    """Vertex AI was chosen but GCP_PROJECT is still a placeholder.
+
+    Without this, the first sign of the problem is a 403 from Google about a
+    project called "your-gcp-project-id".
+    """
+
+    error_code = "gcp_project_required"
+
+    def __init__(self, current: str):
+        self.current = current
+        super().__init__(
+            "Vertex AI needs your Google Cloud project ID. Set GCP_PROJECT in .env "
+            f"(it is {current!r}), then restart. Find it with: gcloud config get-value project"
+        )
 
 
 @dataclass(frozen=True)
@@ -72,6 +95,8 @@ def resolve(provider: Optional[str] = None, api_key: str = "") -> LLMConfig:
     directly.
     """
     chosen = get_provider(provider or get_settings().llm_provider)
+    if chosen.name == "vertex_ai" and (get_settings().gcp_project or "").strip() in PLACEHOLDER_PROJECTS:
+        raise MissingGCPProject(get_settings().gcp_project)
     explicit = provider if provider and chosen.name != default_provider() else None
     llm = get_llm("main", provider=explicit, api_key=(api_key or "").strip())
     return LLMConfig(

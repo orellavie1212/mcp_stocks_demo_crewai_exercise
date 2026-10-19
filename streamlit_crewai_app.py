@@ -239,8 +239,8 @@ def main() -> None:
             # Vertex AI authenticates with application-default credentials
             # (`gcloud auth application-default login`), not a key.
             st.success("✅ Uses your Google Cloud login (application-default credentials)")
-            if not os.getenv("GCP_PROJECT") or os.getenv("GCP_PROJECT") == "your-gcp-project-id":
-                st.warning("⚠️ Set GCP_PROJECT in .env to your GCP project id")
+            if (os.getenv("GCP_PROJECT") or "").strip() in llm_config.PLACEHOLDER_PROJECTS:
+                st.warning("⚠️ Set GCP_PROJECT in .env to your GCP project id, then restart")
         else:
             st.subheader(f"🔑 {spec.label} API key")
             # Keyed per provider so switching vendors does not send an OpenAI

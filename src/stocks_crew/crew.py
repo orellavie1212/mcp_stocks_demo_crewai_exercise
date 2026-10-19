@@ -403,7 +403,7 @@ def run_analysis(
         config = llm_config.resolve(provider, api_key)
     except llm_config.UnknownProvider as e:
         return _failed(symbol, str(e), code=llm_config.UnknownProvider.error_code)
-    except llm_config.MissingAPIKey as e:
+    except (llm_config.MissingAPIKey, llm_config.MissingGCPProject) as e:
         return _failed(symbol, str(e), code=e.error_code)
 
     try:

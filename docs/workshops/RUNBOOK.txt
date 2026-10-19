@@ -244,7 +244,9 @@ Vertex AI: "API not enabled" / 403      -> gcloud services enable
                                            (and check billing is linked)
 Vertex AI: "default credentials were    -> gcloud auth application-default
   not found" / auth errors                 login   (then set-quota-project)
-Vertex AI: "project" missing/wrong      -> set GCP_PROJECT in .env to the
+gcp_project_required / "Permission      -> GCP_PROJECT is still the placeholder
+  denied on resource project              (or there is no .env). Create .env
+  your-gcp-project-id"                     (Step 1), set GCP_PROJECT to your
                                            project ID, restart the lab
 401 / invalid key (Gemini or OpenAI)    -> dos2unix .env, check the key
 Lab 1/2: unknown host "litellm-proxy"   -> LITELLM_BASE_URL in .env must be
