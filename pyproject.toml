@@ -20,10 +20,8 @@ dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
-    "streamlit>=1.36",
-    # Starlette 1.4.0 breaks Streamlit's gzip middleware: every browser request
-    # 500s with "Connection error". Cap until Streamlit catches up.
-    "starlette<1.4",
+    # >=1.66: older Streamlit breaks on Starlette 1.4+ ("Connection error").
+    "streamlit>=1.66",
     # Official MCP Python SDK (mcp.server.fastmcp). Capped <2.0: 2.0 removed it.
     "mcp>=1.9,<2.0",
     # Pinned to versions verified working; see the note in requirements.txt.
@@ -33,6 +31,7 @@ dependencies = [
     "langchain==1.2.12",
     "langchain-google-genai==4.2.1",
     "langchain-openai>=0.2",
+    "langchain-core==1.2.18",
     "langchain-google-vertexai>=1.0",
     "litellm>=1.0.0",
 ]

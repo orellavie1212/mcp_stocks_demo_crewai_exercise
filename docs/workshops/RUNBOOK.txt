@@ -257,7 +257,7 @@ Lab 1: "No module named crewai_tools"   -> source .venv/bin/activate, then
                                            make dev-install
 Lab 1: sidebar "Could not reach the     -> run make lab1-tools to see the
   MCP server"                              real error
-Browser shows only "Connection error"   -> pip install "starlette<1.4"
+Browser shows only "Connection error"   -> pip install -U "streamlit>=1.66"
 Lab 3: old llm.str / llm.BaseLLM error  -> git pull && make lab3-rebuild
 Lab 4: "Cloud Firestore API ...         -> handled automatically by
           SERVICE_DISABLED"                setup-gcp.sh step 1.5; just retry

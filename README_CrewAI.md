@@ -86,7 +86,11 @@ There is no API server to start first. A one-off run from the command line:
 ```bash
 PYTHONPATH=src python -m stocks_crew.crew NVDA                       # provider from .env
 PYTHONPATH=src python -m stocks_crew.crew NVDA --provider=openai
+PYTHONPATH=src python -m stocks_crew.crew NVDA --out=nvda.json      # clean JSON file
 ```
+
+CrewAI prints its own progress to stdout, so redirecting stdout does not give
+valid JSON; use `--out`.
 
 The MCP server on its own (stdio; a silent terminal is correct, stdout carries
 the protocol):
@@ -177,7 +181,7 @@ python -m pytest -m network                       # also hits Yahoo Finance
 |---|---|
 | `No module named 'crewai_tools'` | `make dev-install` (needs `crewai-tools[mcp]`) |
 | Sidebar says "Could not reach the MCP server" | run `make lab1-tools` to see the actual error |
-| Browser shows only "Connection error" | `starlette` is 1.4+; `pip install "starlette<1.4"` |
+| Browser shows only "Connection error" | old Streamlit with Starlette 1.4+; `pip install -U "streamlit>=1.66"` |
 | `gemini_api_key_required` / `openai_api_key_required` | set that provider's key in `.env` or the sidebar |
 | Vertex AI auth or project errors | `gcloud auth application-default login`, and `GCP_PROJECT` in `.env` |
 | LLM calls fail with an unknown host `litellm-proxy` | empty `LITELLM_BASE_URL` in `.env` |

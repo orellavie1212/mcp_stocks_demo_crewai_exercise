@@ -490,4 +490,14 @@ if __name__ == "__main__":
             (a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--provider=")),
             None,
         )
-        print(json.dumps(run_analysis(target, provider=chosen), indent=2))
+        out_path = next(
+            (a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--out=")), None
+        )
+        outcome = json.dumps(run_analysis(target, provider=chosen), indent=2)
+        if out_path:
+            # CrewAI's own console output also goes to stdout, so a redirected
+            # stdout is not valid JSON. --out writes the result cleanly.
+            Path(out_path).write_text(outcome, encoding="utf-8")
+            print(f"Result written to {out_path}")
+        else:
+            print(outcome)

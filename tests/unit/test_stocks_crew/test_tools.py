@@ -130,3 +130,23 @@ def test_indicators_against_the_live_feed():
     payload = json.loads(tools.indicators("AAPL"))
     assert payload["symbol"] == "AAPL"
     assert isinstance(payload["last_close"], float)
+
+
+def test_numeric_output_is_rounded_to_sensible_digits(monkeypatch):
+    """15-digit floats from yfinance ended up verbatim in the agents' reports."""
+    monkeypatch.setattr(
+        tools,
+        "ds_quote",
+        lambda symbol: {
+            "symbol": symbol,
+            "price": 343.459991455078,
+            "change": 1.45999145507812,
+            "change_percent": 0.426898086280154,
+            "volume": 59895300,
+        },
+    )
+    out = json.loads(tools.latest_quote("AAPL"))
+    assert out["price"] == 343.46
+    assert out["change"] == 1.46
+    assert out["change_percent"] == 0.4269
+    assert out["volume"] == 59895300  # integers untouched
