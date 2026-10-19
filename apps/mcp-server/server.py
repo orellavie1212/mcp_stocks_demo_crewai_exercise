@@ -52,9 +52,11 @@ _root_logger = setup_logging(
 )
 log = CorrelatedLogger("mcp-server")
 
-_demo_root = os.path.join(_here, "..", "..")
-if _demo_root not in sys.path:
-    sys.path.insert(0, _demo_root)
+# datasource.py lives in packages/shared-datasource (shared with Lab 1's
+# stocks_crew). In the Docker image it is copied next to server.py.
+_datasource_dir = os.path.join(_here, "..", "..", "packages", "shared-datasource")
+if _datasource_dir not in sys.path:
+    sys.path.insert(0, _datasource_dir)
 
 from datasource import (  # noqa: E402
     search_symbols as ds_search,

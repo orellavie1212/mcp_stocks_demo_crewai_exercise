@@ -11,9 +11,29 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
+import re
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+# Ticker symbols are untrusted text that gets interpolated into agent prompts
+# and passed to MCP tools as an argument. Allow what Yahoo Finance uses
+# (BRK-B, TSM.TW) and nothing else, so "AAPL. Ignore previous instructions..."
+# is rejected before it can become an instruction.
+SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,9}$")
+
+
+def validate_symbol(symbol: str) -> str:
+    """Return the normalized upper-case ticker, or raise ValueError."""
+    candidate = (symbol or "").strip()
+    if not candidate:
+        raise ValueError("symbol is required")
+    if not SYMBOL_RE.match(candidate):
+        raise ValueError(
+            "symbol must be 1-10 characters of letters, digits, '.' or '-' "
+            "(e.g. AAPL, BRK-B)"
+        )
+    return candidate.upper()
 
 
 class JobStatus(str, Enum):
@@ -95,7 +115,7 @@ class AnalysisRequest(BaseModel):
     @classmethod
     def uppercase_symbols(cls, v):
         if isinstance(v, list):
-            return [s.upper().strip() for s in v if s]
+            return [validate_symbol(s) for s in v if s]
         return v
 
 

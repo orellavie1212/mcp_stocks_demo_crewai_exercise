@@ -36,7 +36,7 @@ help:  ## Show this help
 # LOCAL DEV ENVIRONMENT SETUP (uv — WSL2/Windows, macOS, Ubuntu)
 # =============================================================================
 
-dev-install: ## Install all Python deps with uv (Lab 1 root requirements.txt + every apps/*/requirements.txt)
+dev-install: ## Install all Python deps with uv in one resolve (root requirements.txt + every apps/*/requirements.txt)
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install it: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
 	@# --system only when no venv is active (e.g. the devcontainer, which
 	@# installs to the container's system Python like the old `pip3 --user`
@@ -44,12 +44,11 @@ dev-install: ## Install all Python deps with uv (Lab 1 root requirements.txt + e
 	@# into the system/conda Python instead, defeating the venv entirely.
 	@if [ -n "$$VIRTUAL_ENV" ]; then echo "Installing into active venv: $$VIRTUAL_ENV"; \
 	else echo "No active venv — installing with --system"; fi
-	uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r requirements.txt
-	@for r in apps/*/requirements.txt; do \
-	  echo "Installing $$r..."; \
-	  uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r "$$r"; \
-	done
-	@echo "✅ All Python dependencies installed via uv."
+	@# One resolve over every requirements file, not one install per file: separate
+	@# installs let a later file bump a package (e.g. requests) past a constraint an
+	@# earlier one (crewai-tools) needs, and nothing reports it.
+	uv pip install $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) -r requirements.txt $$(for r in apps/*/requirements.txt; do printf -- '-r %s ' "$$r"; done)
+	@uv pip check $$( [ -z "$$VIRTUAL_ENV" ] && echo --system ) && echo "✅ All Python dependencies installed via uv (consistent)."
 
 # =============================================================================
 # LOCAL DEVELOPMENT
@@ -103,21 +102,37 @@ lab3-up-simple: ## Start simplified stack (sync mode, no Pub/Sub, no Redis)
 	docker compose --env-file .env -f docker/docker-compose.simple.yml up --build -d
 
 # =============================================================================
+# LAB 1 — Native, single process. The crew spawns the MCP server itself over
+# stdio, so there is nothing else to start first.
+# =============================================================================
+
+lab1-ui: ## Lab 1  Streamlit UI on :8501 (starts the MCP server on demand)
+	streamlit run streamlit_crewai_app.py
+
+lab1-tools: ## Lab 1  Prove the MCP server is real: handshake + list its tools (no LLM, no tokens)
+	PYTHONPATH=src python -m stocks_crew.crew --list-tools
+
+lab1-api: ## Lab 1  Optional HTTP bridge over the same tools on :8001
+	PYTHONPATH=src uvicorn stocks_crew.api:app --host 127.0.0.1 --port 8001
+
+# =============================================================================
 # LAB 2 — Native local dev (no Docker, direct HTTP between services)
 # Run each target in a separate terminal tab.
 # Order: lab2-mcp → lab2-api → lab2-worker → lab2-ui
+# Langfuse is a Lab 3 (Docker) service, so these targets switch it off; without
+# a server to talk to the SDK logs errors on every call.
 # =============================================================================
 
 lab2-mcp: ## Lab 2 ➊  MCP server on :8001  (open a new terminal first)
 	cd apps/mcp-server && \
-	  GEMINI_API_KEY=$(GEMINI_API_KEY) LOG_FORMAT=text \
+	  GEMINI_API_KEY=$(GEMINI_API_KEY) LOG_FORMAT=text LANGFUSE_ENABLED=false \
 	  uvicorn server:app --host 0.0.0.0 --port 8001
 
 lab2-api: ## Lab 2 ➋  Job API on :8000  (open a new terminal)
 	cd apps/job-api && \
 	  GEMINI_API_KEY=$(GEMINI_API_KEY) \
 	  AGENT_RUNTIME_URL=http://localhost:8002 \
-	  LOG_FORMAT=text \
+	  LOG_FORMAT=text LANGFUSE_ENABLED=false \
 	  uvicorn main:app --host 0.0.0.0 --port 8000
 
 lab2-worker: ## Lab 2 ➌  Agent-runtime worker (HTTP mode) on :8002  (open a new terminal)
@@ -125,7 +140,7 @@ lab2-worker: ## Lab 2 ➌  Agent-runtime worker (HTTP mode) on :8002  (open a ne
 	  GEMINI_API_KEY=$(GEMINI_API_KEY) \
 	  MCP_SERVER_URL=http://localhost:8001 \
 	  JOB_API_URL=http://localhost:8000 \
-	  LOG_FORMAT=text \
+	  LOG_FORMAT=text LANGFUSE_ENABLED=false \
 	  python worker.py --mode http
 
 lab2-ui: ## Lab 2 ➍  Streamlit frontend on :8501  (open a new terminal)
@@ -142,6 +157,7 @@ test: ## Run all unit tests
 	cd packages/shared-guardrails && python -m pytest ../../tests/unit/test_guardrails/ -v
 	cd packages/shared-config && python -m pytest ../../tests/unit/test_config/ -v
 	cd apps/mcp-server && python -m pytest ../../tests/unit/test_mcp_server/ -v
+	python -m pytest tests/unit/test_stocks_crew/ -v
 
 test-integration: ## Run integration tests (requires running stack)
 	python -m pytest tests/integration/ -v --timeout=60
@@ -160,7 +176,7 @@ format: ## Format all Python code
 build: ## Build all Docker images
 	@for svc in mcp-server job-api agent-runtime frontend-streamlit; do \
 	  echo "🔨 Building $$svc..."; \
-	  docker build -t stock-agent-$$svc:latest -f apps/$$svc/Dockerfile apps/$$svc; \
+	  docker build -t stock-agent-$$svc:latest -f apps/$$svc/Dockerfile .; \
 	done
 	@echo "🔨 Building litellm-proxy..."
 	docker build -t stock-agent-litellm-proxy:latest -f docker/litellm/Dockerfile docker/litellm

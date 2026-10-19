@@ -1,0 +1,288 @@
+======================================================================
+                STOCK AGENT WORKSHOP -- LECTURE RUNBOOK
+======================================================================
+
+Everything you run DURING the lecture. PREP.txt should already be done --
+if not, this will fail at Step 0.
+
+Commands are identical on macOS and inside WSL2 Ubuntu. OS-specific notes
+are tagged [Windows / WSL] or [macOS].
+
+The models run on Google Cloud (Vertex AI) using your Google login, so no API
+key is needed. A Gemini or OpenAI key also works -- see Step 1.
+
+
+======================================================================
+  STEP 0 -- TERMINAL, GOOGLE CLOUD ACCOUNT, LOGIN
+======================================================================
+
+  [Windows / WSL]  Launch "Ubuntu" from the Start menu.
+  [macOS]          Open Terminal.app (or iTerm).
+
+Confirm you are NOT in a Windows PowerShell / cmd.exe window.
+    [Windows / WSL]   prompt should look like  user@host:~$
+    [macOS]           prompt should look like  user@hostname ~ %
+
+--------------------------------------------------------------------------------
+  0.1) Create the Google Cloud account and project (done together, live)
+--------------------------------------------------------------------------------
+1. Open https://console.cloud.google.com and sign in with a Google account.
+2. Activate the free trial ($300 credit; a payment card is required).
+3. Create a project. Write down its PROJECT ID -- the id, not the name.
+   Example id:  project-b5c869a1-adac-4e85-8fd
+4. Make sure the project is linked to your billing account.
+
+--------------------------------------------------------------------------------
+  0.2) Log in with gcloud and enable Vertex AI
+--------------------------------------------------------------------------------
+  [macOS]          gcloud auth login
+                   gcloud auth application-default login
+
+  [Windows / WSL]  gcloud auth login --no-launch-browser
+                   gcloud auth application-default login --no-launch-browser
+
+The --no-launch-browser flag on WSL prints a URL you paste into any
+browser, then paste the code back into the terminal -- avoids the flaky
+WSL->Windows browser redirect.
+
+Then, for both OSes (replace <project-id> with your PROJECT ID):
+
+    gcloud config set project <project-id>
+    gcloud auth application-default set-quota-project <project-id>
+    gcloud services enable aiplatform.googleapis.com --project=<project-id>
+
+The last line turns on the Vertex AI API (it may appear as "Agent Platform" in
+the console). If it fails, billing is not linked to the project yet (0.1).
+
+
+======================================================================
+  STEP 1 -- CLONE REPO + PREPARE .env
+======================================================================
+
+    cd ~
+    git clone https://github.com/orellavie1212/mcp_stocks_demo_crewai_exercise.git
+    cd mcp_stocks_demo_crewai_exercise
+
+Create your .env from the example and put in your project id:
+
+    cp .env.example .env
+    nano .env           # or: vim .env / code .env
+                        # edit the line  GCP_PROJECT=your-gcp-project-id
+
+Leave  LLM_PROVIDER=vertex_ai  and  LITELLM_BASE_URL=  (empty) as they are.
+
+  [Windows / WSL] If you instead copy a .env from your Windows filesystem,
+  strip CRLF line endings or you will get authentication errors:
+
+        dos2unix .env
+
+Quick sanity check -- this should print your project id and the provider:
+
+    grep -E '^(GCP_PROJECT|GCP_REGION|LLM_PROVIDER|LITELLM_BASE_URL)=' .env
+
+Optional -- use an API key instead of Vertex AI:
+    Gemini (AI Studio):  LLM_PROVIDER=google_ai_studio  and  GEMINI_API_KEY=...
+    OpenAI:              LLM_PROVIDER=openai            and  OPENAI_API_KEY=...
+
+
+======================================================================
+  STEP 2 -- PYTHON ENV + DEPENDENCIES
+======================================================================
+
+Still in ~/mcp_stocks_demo_crewai_exercise:
+
+    uv venv --python 3.12 .venv
+    source .venv/bin/activate        # macOS and WSL (same command)
+    make dev-install                 # installs everything for Labs 1-3
+
+uv downloads Python 3.12 the first time. make dev-install takes a few minutes.
+
+Every time you open a NEW terminal tab, run these two lines first:
+
+    cd ~/mcp_stocks_demo_crewai_exercise
+    source .venv/bin/activate
+
+
+======================================================================
+  STEP 3 -- LAB 1: SYNC MODE (1 tab)
+======================================================================
+
+Optional first -- prove the MCP server is real (no model, no cost):
+
+    make lab1-tools
+
+It starts the MCP server, does the handshake and prints its 5 tools.
+
+Run the lab:
+
+    make lab1-ui
+
+Open in your browser:    http://localhost:8501
+
+There is no API server to start: the crew launches the MCP server itself.
+
+Validate you are on Vertex AI:
+  - Sidebar, "Provider": Google Gemini (Vertex AI)
+  - Green message: "Uses your Google Cloud login"
+  - Sidebar, "MCP server": "Handshake OK - 5 tools"
+  - If you see a warning about GCP_PROJECT, fix .env, then stop (Ctrl+C) and
+    run make lab1-ui again.
+
+Type AAPL and click "Start analysis". When it finishes, look at:
+  - the report,
+  - the "Output guardrail" panel (are all figures backed by tool results?),
+  - the "Tool call trace" (every MCP call the agents made).
+
+Stop with Ctrl+C when moving to Lab 2.
+
+
+======================================================================
+  STEP 4 -- LAB 2: ASYNC HTTP (4 tabs)
+======================================================================
+
+Every tab: cd into the repo and activate the venv (see Step 2).
+
+  Tab 1 -- MCP server on :8001
+
+        make lab2-mcp
+
+  Tab 2 -- Job API on :8000
+
+        make lab2-api
+
+  Tab 3 -- Agent runtime (HTTP mode) on :8002
+
+        make lab2-worker
+
+  Tab 4 -- Streamlit UI on :8501
+
+        make lab2-ui
+
+Open in your browser:    http://localhost:8501
+
+Lab 2 keeps jobs in memory (there is no Firestore), so jobs disappear when the
+Job API restarts.
+
+The Makefile auto-loads .env, so GCP_PROJECT and LLM_PROVIDER flow into every
+tab. Your gcloud login (Step 0.2) is picked up automatically.
+
+Stop all 4 tabs with Ctrl+C when moving to Lab 3.
+
+
+======================================================================
+  STEP 5 -- LAB 3: DOCKER COMPOSE
+======================================================================
+
+Docker Desktop must be running (Whale icon visible in the tray / menu bar).
+Your gcloud login (Step 0.2) must be done: the LiteLLM container uses it to
+reach Vertex AI.
+
+  Start the stack (builds on first run, ~3-5 min):
+
+        make lab3-up
+
+  Service URLs:
+      Streamlit UI   http://localhost:8501
+      Job API docs   http://localhost:8000/docs
+      MCP docs       http://localhost:8001/docs
+      LiteLLM Proxy  http://localhost:4010
+      Langfuse UI    http://localhost:3000   (admin@example.com / admin123)
+
+  Tail logs:
+
+        make logs
+
+  Stop:
+
+        make lab3-down
+
+  If you change requirements.txt or see old LLM validation errors, force a
+  clean rebuild:
+
+        make lab3-rebuild
+
+
+======================================================================
+  STEP 6 -- LAB 4: GCP
+======================================================================
+
+--------------------------------------------------------------------------------
+  6.1) Check you are still logged in
+--------------------------------------------------------------------------------
+    gcloud auth list
+    gcloud config get-value project
+
+If the account is missing or the project is wrong, repeat Step 0.2.
+
+--------------------------------------------------------------------------------
+  6.2) Confirm .env has the right GCP values
+--------------------------------------------------------------------------------
+    grep -E '^(GCP_PROJECT|GCP_REGION)=' .env
+
+If GCP_PROJECT is still the placeholder, edit .env now.
+
+--------------------------------------------------------------------------------
+  6.3) Deploy
+--------------------------------------------------------------------------------
+    make setup-gcp        # provisions infra + builds + deploys (~15-20 min)
+    make show-urls        # prints the deployed Cloud Run service URLs
+
+No API key is needed: the deployed services use Vertex AI.
+
+--------------------------------------------------------------------------------
+  6.4) Teardown (IMPORTANT -- run at end of lecture to stop billing)
+--------------------------------------------------------------------------------
+    make teardown         # interactive; asks for confirmation
+
+
+======================================================================
+  TROUBLESHOOTING QUICK-REF
+======================================================================
+
+Symptom                                 -> Fix
+--------------------------------------------------------------------------
+Vertex AI: "API not enabled" / 403      -> gcloud services enable
+                                           aiplatform.googleapis.com
+                                           --project=<project-id>
+                                           (and check billing is linked)
+Vertex AI: "default credentials were    -> gcloud auth application-default
+  not found" / auth errors                 login   (then set-quota-project)
+gcp_project_required / "Permission      -> GCP_PROJECT is still the placeholder
+  denied on resource project              (or there is no .env). Create .env
+  your-gcp-project-id"                     (Step 1), set GCP_PROJECT to your
+                                           project ID, restart the lab
+401 / invalid key (Gemini or OpenAI)    -> dos2unix .env, check the key
+Lab 1/2: unknown host "litellm-proxy"   -> LITELLM_BASE_URL in .env must be
+                                           empty (only Lab 3 uses the proxy)
+Pydantic bool/int parse error at start  -> strip inline comments from .env:
+                                             [WSL]   sed -i    'EXPR' .env
+                                             [macOS] sed -i '' 'EXPR' .env
+                                           where EXPR is: s/[[:space:]]*#.*$//
+Lab 1: "No module named crewai_tools"   -> source .venv/bin/activate, then
+                                           make dev-install
+Lab 1: sidebar "Could not reach the     -> run make lab1-tools to see the
+  MCP server"                              real error
+Browser shows only "Connection error"   -> pip install -U "streamlit>=1.66"
+Lab 3: old llm.str / llm.BaseLLM error  -> git pull && make lab3-rebuild
+Lab 4: "Cloud Firestore API ...         -> handled automatically by
+          SERVICE_DISABLED"                setup-gcp.sh step 1.5; just retry
+Lab 4: "Cannot import non-existent      -> handled automatically by
+          remote object" on Firestore      setup-gcp.sh step 1.6; just retry
+Lab 4: rollout "timed out waiting       -> non-fatal; watch pods come up:
+          for the condition"                 kubectl get pods -n stock-agent -w
+                                             make show-urls
+Docker daemon permission denied (WSL)   -> Docker Desktop -> Settings ->
+                                           Resources -> WSL Integration:
+                                           re-toggle your distro, restart
+                                           Docker Desktop
+Port 8501/8000/8001 already in use      -> kill the Windows-side / macOS
+                                           Streamlit that's already running
+
+
+======================================================================
+  MORE HELP
+======================================================================
+
+Full troubleshooting appendix lives in the repo:  WINDOWSREADME.md
+Lab 1 details (architecture, YAML crew):          README_CrewAI.md
+Workshop docs:                                    docs/workshops/

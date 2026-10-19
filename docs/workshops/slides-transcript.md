@@ -168,26 +168,27 @@ FREE            FREE            FREE               ~$0.50/hr idle
 
 **Prerequisites:**
 ```bash
-git clone https://github.com/zviba/mcp_stocks_demo_crewai_exercise.git
+git clone https://github.com/orellavie1212/mcp_stocks_demo_crewai_exercise.git
 cd mcp_stocks_demo_crewai_exercise
 cp .env.example .env
-# Edit .env → set GEMINI_API_KEY=your-key-here
+# Edit .env → set GCP_PROJECT=<your project id>   (default provider: Vertex AI, no key)
+# or LLM_PROVIDER=google_ai_studio + GEMINI_API_KEY, or LLM_PROVIDER=openai + OPENAI_API_KEY
 ```
 
-**Terminal 1 — Health check API:**
+**Install (venv active):**
 ```bash
-pip install -r requirements.txt
-uvicorn api:app --host 127.0.0.1 --port 8001
+make dev-install
+make lab1-tools      # optional: real MCP handshake, lists the 5 tools, no LLM
 ```
 
-**Terminal 2 — Streamlit UI:**
+**Run — one terminal, no API server to start:**
 ```bash
-streamlit run streamlit_crewai_app.py
+make lab1-ui
 ```
 
 **Open:** `http://localhost:8501`
-- Enter your Gemini API key in the sidebar
-- Type `AAPL` → click **Start Analysis**
+- Pick a provider in the sidebar (Vertex AI needs no key; the others take a key)
+- Type `AAPL` → click **Start analysis**
 - ⏳ Wait 1–2 minutes…
 
 **Exercise:** Open a second browser tab → try submitting `MSFT`. What happens?
@@ -196,7 +197,7 @@ streamlit run streamlit_crewai_app.py
 
 ## SLIDE 7 — Lab 1: Architecture
 
-**Title:** 🏗️ Lab 1 — Single Process, Everything In-Memory
+**Title:** 🏗️ Lab 1 — One Machine: the Crew Plus an MCP Server over stdio
 
 **Content:**
 
@@ -204,25 +205,26 @@ streamlit run streamlit_crewai_app.py
 Browser
    │
    ▼
-streamlit_crewai_app.py   ← UI + business logic (SAME process!)
-   │  direct Python import
+streamlit_crewai_app.py   ← UI (SAME process as the crew)
+   │  direct Python call
    ▼
-agents.py                 ← 4 CrewAI agents, sequential crew
-   │  direct Python import
+src/stocks_crew/crew.py   ← 4 CrewAI agents from YAML, sequential crew
+   │  real MCP: JSON-RPC over stdio (child process)
    ▼
-mcp_server.py             ← @tool functions (not an actual server!)
-   │  direct Python import
+src/stocks_crew/mcp_server.py  ← FastMCP server, 5 tools
+   │  Python call
    ▼
-datasource.py             ← yfinance → Yahoo Finance API
+packages/shared-datasource/datasource.py  ← yfinance → Yahoo Finance API
 ```
 
 **Key files:**
 | File | Role |
 |------|------|
-| `streamlit_crewai_app.py` | UI + calls `run_crewai_analysis()` |
-| `agents.py` | Agent + task definitions |
-| `mcp_server.py` | `@tool`-decorated functions |
-| `datasource.py` | yfinance wrapper |
+| `streamlit_crewai_app.py` | UI + calls `run_analysis()` |
+| `src/stocks_crew/config/*.yaml` | Agent + task definitions, per-agent tool allow-lists |
+| `src/stocks_crew/crew.py` | Builds the crew, MCP client, guardrail check |
+| `src/stocks_crew/mcp_server.py` | MCP server (`@mcp.tool()` wrappers over `tools.py`) |
+| `packages/shared-datasource/datasource.py` | yfinance wrapper |
 
 ---
 
@@ -237,15 +239,15 @@ datasource.py             ← yfinance → Yahoo Finance API
 - ✅ Runs 4 specialized AI agents in sequence
 - ✅ Calls real market data tools (yfinance)
 - ✅ Produces a structured analysis report with disclaimer
-- ✅ Works completely offline (no cloud needed)
-- ✅ Zero infra setup — just `pip install` and run
+- ✅ Runs on your laptop (no cloud infrastructure of your own; it still calls Yahoo Finance and a model)
+- ✅ Zero infra setup — install and run
 
 **Non-Functional Strengths:**
 - ✅ **Zero latency to start** — no Docker, no containers, no boot time
-- ✅ **Debuggable** — set a breakpoint anywhere, single Python process
-- ✅ **Readable** — all logic in 4 files, < 500 lines total
-- ✅ **Portable** — runs on any machine with Python 3.11+
-- ✅ **Free** — no cloud costs, no Docker, just a Gemini API key
+- ✅ **Debuggable** — set a breakpoint anywhere; one machine, no containers
+- ✅ **Readable** — a few small modules plus two YAML files
+- ✅ **Portable** — runs on any machine with Python 3.12 (3.11 also works)
+- ✅ **Cheap** — no infrastructure costs, no Docker; just model usage (Vertex AI login, or a Gemini/OpenAI key)
 
 **This is perfect for:**
 - Prototyping a new agent idea
@@ -344,7 +346,7 @@ apps/job-api/main.py  :8000
    ▼
 apps/agent-runtime/worker.py  :8002  (--mode http)
   (runs CrewAI crew → PATCH /jobs/{job_id} with result)
-   │  POST /quote  /indicators  /events…
+   │  real MCP (Streamable HTTP) → /mcp/
    ▼
 apps/mcp-server/server.py  :8001
   (production MCP server: auth + logging + health checks)
@@ -478,7 +480,7 @@ Pub/Sub Emulator :8085
    ▼
 agent-runtime (Pub/Sub subscriber mode)
   (subscribes to topic, processes job, acks or nacks)
-   │  POST /search /quote /indicators…
+   │  real MCP (Streamable HTTP) → /mcp/
    ▼
 mcp-server :8001
    │
@@ -737,7 +739,7 @@ GCP Pub/Sub (managed)           ← durable, at-least-once delivery
    ▼
 GKE Autopilot: agent-runtime    ← HPA scales on Pub/Sub queue depth
    └── Workload Identity → Vertex AI / Firestore / Pub/Sub
-   │  POST /quote /indicators…
+   │  real MCP (Streamable HTTP) → /mcp/
    ▼
 Cloud Run: mcp-server           ← scale-to-zero
 

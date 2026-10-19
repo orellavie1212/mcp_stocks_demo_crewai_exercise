@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
@@ -7,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import yfinance as yf
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def search_symbols(q: str, limit: int = 12) -> List[Dict[str, Any]]:
@@ -146,8 +149,8 @@ def price_series(symbol: str, interval: str = "daily", lookback: int = 180) -> p
             threads=True,
             group_by="column",   
         )
-        print("yfinance columns:", list(hist.columns))
-        print("sample rows:\n", hist.head(3))
+        logger.debug("yfinance columns for %s: %s", symbol, list(hist.columns))
+        logger.debug("yfinance sample rows for %s:\n%s", symbol, hist.head(3))
     except Exception:
         hist = None
 

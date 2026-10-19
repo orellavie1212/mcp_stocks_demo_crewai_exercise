@@ -1,0 +1,165 @@
+# tasks.yaml -- what the crew does, in order.
+#
+# Tasks run in the order they appear here (Process.sequential).
+# `agent`   -> a key from agents.yaml
+# `context` -> keys of earlier tasks whose output is fed in
+#
+# Same {placeholders} as agents.yaml.
+#
+# The "call this tool, do not guess" phrasing is deliberate and worth a minute
+# in class: it is a *prompt*, not a guarantee. The trace from ToolTracer (packages/shared-observability) is how you
+# find out whether the model actually complied.
+
+research:
+  description: |
+    Research the ticker {symbol}.
+
+    Call these tools, in this order:
+      1. `search_symbols` with the query "{symbol}" -- confirm the symbol exists
+         and note the company name exactly as returned.
+      2. `latest_quote` for {symbol} -- current price, change, change percent
+         and volume.
+      3. `price_series` for {symbol} -- the recent daily history.
+
+    Report the values exactly as the tools returned them. If a tool returns an
+    error or an empty result, say which tool and what it said -- do not
+    substitute a remembered or estimated figure.
+  expected_output: >
+    A structured research note containing the confirmed symbol and company name,
+    the current price/change/volume, and a short summary of the recent price
+    history (first close, last close, high, low over the window). Every figure
+    must be traceable to one of the three tool calls, and any failed tool call
+    must be named.
+  agent: research
+
+technical:
+  description: |
+    Assess the technical condition of {symbol}, using the research note as
+    context.
+
+    Call these tools:
+      1. `indicators` for {symbol} -- last_close, SMA, EMA and RSI.
+      2. `detect_events` for {symbol} -- gap, volatility-spike and 52-week
+         extreme flags.
+
+    Quote the numbers you get back ("RSI is 61.4", not "RSI is elevated"). A
+    null indicator means there was not enough history -- say so rather than
+    computing your own. Then describe what the values imply over roughly
+    {horizon_days} days.
+
+    Rules: no investment advice, no price targets, no predictions.
+  expected_output: >
+    A technical read that lists the exact indicator values from `indicators`
+    (naming any that came back null), the flags from `detect_events`, and a
+    plain-language interpretation of the momentum and any notable levels.
+  agent: technical
+  context:
+    - research
+
+# --- the exercise ---------------------------------------------------------
+#
+# The sector task. It runs third because `context` may only name tasks that have
+# already run, and it needs both of the ones above.
+#
+# Read the brief against the tool list this desk actually has. The obvious
+# version of this task asks for P/E ratio, market cap and revenue growth -- the
+# things a human sector analyst compares first. No tool here returns any of
+# them, so that brief instructs the agent to produce numbers it can only invent,
+# and grounding.py then flags every one of them as ungrounded. The fix is not a
+# softer guardrail; it is a brief that asks for what the tools can supply. That
+# is the constraint worth feeling: an agent's job description is bounded by its
+# tools, and writing a task that outruns them is the most common way to
+# manufacture a hallucination.
+sector:
+  description: |
+    Compare {symbol} against its sector peers, using the research note and the
+    technical read as context.
+
+    Pick three to five companies you believe trade in the same sector as
+    {symbol}. That choice comes from your own knowledge -- no tool here returns a
+    peer list -- which is exactly why each one must be confirmed before it is
+    used:
+
+      1. `search_symbols` for each candidate -- confirm the ticker exists and use
+         the company name exactly as returned. Drop any candidate that does not
+         resolve, and say which one you dropped.
+      2. `latest_quote` for each confirmed peer -- price, change, change percent
+         and volume.
+      3. `indicators` for each confirmed peer -- last_close, SMA, EMA and RSI.
+
+    Then compare {symbol} against them on those values only: where its change
+    percent sits in the group, where its RSI sits, how it stands relative to its
+    own SMA and EMA compared with how the peers stand relative to theirs.
+
+    Do NOT report P/E ratios, market capitalisation, revenue growth, analyst
+    ratings or index membership. No tool on this desk returns them, so any figure
+    you write for them would be invented. State once that valuation and
+    fundamental metrics are outside the available tools, and move on.
+
+    If a peer's tools return an error or no data, name the peer and the tool and
+    exclude it from the comparison rather than filling the gap.
+
+    Rules: no investment advice, no price targets, no predictions, and no ranking
+    of peers as better or worse investments.
+  expected_output: >
+    A sector comparison containing the confirmed peer tickers with the company
+    names `search_symbols` returned, a table of {symbol} against each peer
+    showing price, change percent and RSI as the tools returned them, a short
+    read on where {symbol} sits in that group, an explicit note that valuation
+    and fundamental metrics were not available from the tools, and a list of any
+    peers dropped for missing data. Every figure must come from a tool call.
+  agent: sector
+  context:
+    - research
+    - technical
+
+report:
+  description: |
+    Write the final report on {symbol}, synthesizing the research note, the
+    technical read and the sector comparison. Do not call any tools; everything
+    you need is in the context.
+
+    WRITE THE ENTIRE REPORT IN {language}. The context you were handed is in
+    English -- translate it. Section headings, prose, labels and the disclaimer
+    are all in {language}. Only ticker symbols and numbers stay as they are.
+
+    Sections (translate these headings into {language}):
+      1. Executive summary
+      2. Current market position (price, change, volume)
+      3. Technical picture (indicators, events)
+      4. Sector comparison (the confirmed peers and where {symbol} sits among
+         them). Carry the peer figures through as the sector analyst reported
+         them, and repeat the note that valuation and fundamental metrics were
+         not available from the tools. Do not rank the peers as investments.
+      5. What the signals do and do not support
+      6. Data quality -- anything that was missing or errored, including any peer
+         dropped for missing data
+      7. Disclaimer
+
+    - Language: {language} -- every word of the output, no exceptions.
+    - Tone: {tone}.
+    - No investment advice. No price targets. No predictions.
+  expected_output: >
+    A professional markdown report written entirely in {language}, with the seven
+    sections above, every figure consistent with the analysis it was given,
+    ending with an explicit statement -- in {language} -- that this is not
+    investment advice.
+  agent: report
+  context:
+    - research
+    - technical
+    - sector
+  # CrewAI's built-in output check, attached to the task that writes the prose.
+  # `true` takes its defaults; a mapping passes the constructor's options through
+  # (e.g. `threshold: 8.0`, `context: "..."`).
+  #
+  # Switched on for the contrast, not for the protection: in the open-source
+  # crewai package this class is a placeholder that passes every output and
+  # prints a link to the hosted platform. The real check on this report is
+  # grounding.py, which runs afterwards in plain Python. See the note above
+  # `_hallucination_guardrail` in crew.py.
+  #
+  # Note what it would have caught if it were live: the sector agent's peers are
+  # the one part of this report no tool can ground (see EXERCISE_INSTRUCTIONS.md,
+  # "The gap that remains"). Do not read this line as that gap being closed.
+  hallucination_guardrail: true
