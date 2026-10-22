@@ -36,3 +36,7 @@ langchain-openai>=0.2
 # a newer langchain-core that apps/agent-runtime then has to downgrade.
 langchain-core==1.2.18
 
+# Transitive (via langchain-google-vertexai -> google-cloud-aiplatform). Without
+# this floor the single-resolve `make dev-install` picks google-cloud-bigquery
+# 2.28.1 (python <3.10), which `uv pip check` rejects on Python 3.12.
+google-cloud-bigquery>=3
